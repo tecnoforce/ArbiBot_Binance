@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "skills": {
+    "mnemonics": {
+      "source": "5kahoisaac/opencode-historian",
+      "ref": "main",
+      "sourceType": "github",
+      "skillPath": "src/skills/mnemonics/SKILL.md",
+      "computedHash": "e481b9e8ff3a55f72428d9b1913f9e20f4d0160c35683ed6107251e0aa8ba84b"
+    }
+  }
+}

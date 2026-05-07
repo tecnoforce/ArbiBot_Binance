@@ -1,0 +1,25 @@
+# API Keys & Configuraciones
+user.apiConfig
+user.coins
+*.config
+
+# Binarios
+binance-arbitrage-bot/target/*.jar
+
+# Eventos y sequences (logs runtime)
+*.events
+*.sequences
+*.stats
+
+# Logs
+*.log
+triangulos.txt
+programa.txt
+
+# IDE
+.idea/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
