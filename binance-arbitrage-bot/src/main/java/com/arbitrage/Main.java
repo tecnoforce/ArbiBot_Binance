@@ -12,6 +12,7 @@ import com.arbitrage.model.Ticker;
 import com.arbitrage.model.Triangle;
 import com.arbitrage.trading.BinanceApiClient;
 import com.arbitrage.trading.OrderExecutor;
+import com.arbitrage.trading.WalletSyncManager;
 import com.arbitrage.util.Log;
 import com.arbitrage.websocket.BinanceWebSocketClient;
 import com.arbitrage.websocket.PriceUpdateHandler;
@@ -310,15 +311,12 @@ public class Main {
             display.setConnectionStatus(connected);
             display.setTestnet(isTestnet);
 
-            // apiClient ya fue creado arriba para cargar simbolos
-            double[] balances = apiClient.getAccountBalances();
-            double usdtBalance = balances[0];
-            double bnbBalance = balances[1];
-            double bnbPrice = balances[2];
-
-            display.setBalances(usdtBalance, bnbBalance, bnbPrice);
+            WalletSyncManager walletSync = new WalletSyncManager(apiClient, config.getWalletSyncIntervalMs());
+            display.setWalletSyncManager(walletSync);
             display.updateOpportunityCount(triangles.size());
-            display.showDashboard(config, connected, isTestnet, usdtBalance, bnbBalance, bnbPrice, config.getLogLevel());
+            display.showDashboard(config, connected, isTestnet,
+                walletSync.getUsdtBalance(), walletSync.getBnbBalance(),
+                walletSync.getBnbPrice(), config.getLogLevel());
 
             if (!isScanMode) {
                 System.out.println();
@@ -343,30 +341,174 @@ public class Main {
             }
 
             OrderExecutor orderExecutor = new OrderExecutor(config, apiClient, seqFileManager);
-            orderExecutor.setSequenceDisplay(new OrderExecutor.SequenceDisplay() {
+            orderExecutor.setWalletSyncManager(walletSync);
+            
+            if (config.isRealorder() && seqFileManager != null) {
+                com.arbitrage.persistence.SequenceRecoveryManager recovery = 
+                    new com.arbitrage.persistence.SequenceRecoveryManager(apiClient, seqFileManager, orderExecutor, config);
+                recovery.loadAndRecoverSequences();
+            }
+            
+orderExecutor.setSequenceDisplay(new OrderExecutor.SequenceDisplay() {
+
+                class OrderState {
+                    String symbol = "";
+                    String side = "";
+                    double qty = 0;
+                    double price = 0;
+                    String status = "WAITING";
+                    long elapsedMs = 0;
+                    String orderId = "------";
+                    String orderType = "";
+                    long sentTime = 0;
+                }
+
+                class SeqState {
+                    int seqId;
+                    long startTime;
+                    OrderState[] orders = new OrderState[3];
+                    double profitPct;
+                    boolean started;
+                    boolean live;
+                    String estadoTag = null;
+                    boolean estadoTagPrinted = false;
+                    {
+                        for (int i = 0; i < 3; i++) orders[i] = new OrderState();
+                    }
+                }
+
+                private final java.util.Map<Integer, SeqState> seqStates = new java.util.HashMap<>();
+
+                private String fmtQty(double qty) {
+                    String s = String.format("%.8f", qty);
+                    return s.startsWith("0.") ? s.substring(1) : s;
+                }
+
+                private String fmtTime(long ts) {
+                    if (ts <= 0) return "--";
+                    long now = System.currentTimeMillis();
+                    long elapsed = now - ts;
+                    return elapsed + "ms";
+                }
+
+                private String colorForStatus(String status) {
+                    switch (status) {
+                        case "FILLED":   return "\u001B[32m";
+                        case "OPENED":   return "\u001B[36m";
+                        case "CANCELED":
+                        case "REJECTED":
+                        case "EXPIRED":
+                        case "ERROR":    return "\u001B[31m";
+                        default:         return "\u001B[37m";
+                    }
+                }
+
+                private String formatOrderLine(OrderState o, int opNum) {
+                    String qtyStr = fmtQty(o.qty);
+                    String priceStr = String.format("%.8f", o.price);
+                    String elapsedStr = fmtTime(o.sentTime);
+                    String orderIdStr = ("------".equals(o.orderId) || o.orderId == null || o.orderId.isEmpty()) ? "------" : o.orderId;
+                    String statusColor = colorForStatus(o.status);
+                    return statusColor + String.format("  [Op%d] %-8s %-5s Qty:%12s Price:%14s Status:%-9s ElapsedTime:%s OrderId %-10s %s",
+                        opNum, o.symbol, o.side, qtyStr, priceStr, o.status, elapsedStr, orderIdStr, o.orderType) + "\u001B[37m";
+                }
+
+                private void printBlock(SeqState s) {
+                    java.time.LocalDateTime dt = java.time.LocalDateTime.ofInstant(
+                        java.time.Instant.ofEpochMilli(s.startTime), java.time.ZoneId.systemDefault());
+                    String timeStr = dt.format(java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss"));
+                    String mode = s.live ? "LIVE" : "SIMULATED";
+                    String estadoTagStr = (!s.estadoTagPrinted && s.estadoTag != null)
+                        ? " (" + s.estadoTag + ")"
+                        : "";
+                    System.out.println();
+                    System.out.println("SeqId (#" + s.seqId + ") --> " + timeStr + " (" + mode + ")" + estadoTagStr);
+                    for (int i = 0; i < 3; i++) {
+                        System.out.println(formatOrderLine(s.orders[i], i + 1));
+                    }
+                    String profitColor = s.profitPct > 0 ? "\u001B[32m" : (s.profitPct < 0 ? "\u001B[33m" : "\u001B[37m");
+                    System.out.println("profit= " + profitColor + String.format("%.4f", s.profitPct) + "%\u001B[37m");
+                    if (!s.estadoTagPrinted && s.estadoTag != null) {
+                        s.estadoTagPrinted = true;
+                    }
+                }
+
                 @Override
                 public void showStart(int sequenceId, long timestamp, double profitPct, boolean live) {
-                    display.showStart(sequenceId, timestamp, profitPct, live);
+                    SeqState s = seqStates.computeIfAbsent(sequenceId, k -> {
+                        SeqState ns = new SeqState();
+                        ns.seqId = sequenceId;
+                        ns.started = false;
+                        return ns;
+                    });
+                    s.startTime = timestamp;
+                    s.profitPct = profitPct;
+                    s.live = live;
                 }
-                
+
                 @Override
-                public void showOrderPending(int opNum, String symbol, String side, double qty, double price, String orderType) {
-                    display.showOrderPending(opNum, symbol, side, qty, price, orderType);
+                public void showOrderPending(int seqId, int opNum, String symbol, String side, double qty, double price, String orderType) {
                 }
-                
+
                 @Override
-                public void showOrderFilled(OrderResult r) {
-                    display.showOrderFilled(r);
+                public void showOrderFilled(int seqId, int opNum, OrderResult r) {
                 }
-                
+
                 @Override
                 public void showEnd(int sequenceId, boolean success, double profitPct) {
-                    display.showEnd(sequenceId, success, profitPct);
                 }
 
                 @Override
                 public void printSequenceAtomic(int sequenceId, long timestamp, boolean live, java.util.List<OrderResult> orders, double profitPct) {
-                    display.printSequenceAtomic(sequenceId, timestamp, live, orders, profitPct);
+                }
+
+                @Override
+                public void showSequenceEstado(int seqId, String estado) {
+                    SeqState s = seqStates.get(seqId);
+                    if (s == null) return;
+                    s.estadoTag = estado;
+                    s.estadoTagPrinted = false;
+                }
+
+                @Override
+                public void showOrderStatus(int seqId, int opNum, String symbol, String side,
+                        double qty, double price, String status, long elapsedMs,
+                        String orderId, String orderType) {
+
+                    SeqState s = seqStates.computeIfAbsent(seqId, k -> {
+                        SeqState ns = new SeqState();
+                        ns.seqId = seqId;
+                        ns.started = false;
+                        return ns;
+                    });
+
+                    int idx = opNum - 1;
+
+                    boolean statusChanged = !s.orders[idx].status.equals(status);
+                    boolean orderIdChanged = !s.orders[idx].orderId.equals(orderId);
+                    boolean dataChanged = statusChanged || orderIdChanged ||
+                        !s.orders[idx].symbol.equals(symbol) ||
+                        Math.abs(s.orders[idx].qty - qty) > 1e-10 ||
+                        Math.abs(s.orders[idx].price - price) > 1e-10;
+
+                    if (!dataChanged) return;
+
+                    s.orders[idx].symbol = symbol;
+                    s.orders[idx].side = side;
+                    s.orders[idx].qty = qty;
+                    s.orders[idx].price = price;
+                    s.orders[idx].status = status;
+                    s.orders[idx].orderId = orderId;
+                    s.orders[idx].orderType = orderType;
+
+                    if (!status.equals("WAITING")) {
+                        long now = System.currentTimeMillis();
+                        if (statusChanged) {
+                            s.orders[idx].sentTime = now - elapsedMs;
+                        }
+                    }
+
+                    printBlock(s);
                 }
             });
 
@@ -378,9 +520,12 @@ public class Main {
             );
             engine.start();
 
+            walletSync.start();
+
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
                 Log.print("=== SHUTDOWN ===");
                 engine.stop();
+                walletSync.stop();
                 wsClient.close();
                 orderExecutor.shutdown();
                 apiClient.shutdown();

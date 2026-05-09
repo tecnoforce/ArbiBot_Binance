@@ -186,6 +186,11 @@ public class ArbitrageEngine {
         String triangleId = opportunity.getTriangle().getId();
         double profitPct = opportunity.getProfitPct();
         
+        // Solo ejecutar si profit >= minProfit configurado
+        if (profitPct < config.getMinProfit()) {
+            return;
+        }
+        
         // Obtiene profit anterior de este triangulo
         Double lastProfit = lastProfitByTriangle.get(triangleId);
 
@@ -197,20 +202,19 @@ public class ArbitrageEngine {
             // Incrementa contador
             opportunityCount.incrementAndGet();
             
-            // Logea oportunidades segun nivel de log
+            // Logea la oportunidad
             String currentLevel = Log.getCurrentLevel();
+            String prefix = profitPct > 0 ? "[+]" : "[-]";
+            String logMsg = "OPORTUNIDAD: " + prefix + " " + triangleId + " | Profit: " + String.format("%.4f", profitPct) + "%";
+            
             if ("SCAN".equals(currentLevel)) {
-                // SCAN: Solo positivos - ejecutar y loggear
-                if (profitPct > 0) {
-                    opportunityConsumer.accept(opportunity);
-                    Log.scan(TAG, "OPORTUNIDAD: " + triangleId + " | Profit: " + String.format("%.4f", profitPct) + "%");
-                }
+                Log.scan(TAG, logMsg);
             } else {
-                // INFO/DEBUG: Todos (positivos y negativos) - ejecutar y loggear
-                opportunityConsumer.accept(opportunity);
-                String prefix = profitPct > 0 ? "[+]" : "[-]";
-                Log.info(TAG, "OPORTUNIDAD: " + prefix + " " + triangleId + " | Profit: " + String.format("%.4f", profitPct) + "%");
+                Log.info(TAG, logMsg);
             }
+            
+            // Ejecuta la oportunidad (ya filtrada por profit >= minProfit)
+            opportunityConsumer.accept(opportunity);
         }
     }
 

@@ -10,7 +10,7 @@ import lombok.NoArgsConstructor;
 @NoArgsConstructor
 @AllArgsConstructor
 public class SequenceOrder {
-    private String seqId;
+    private int seqId;
     private int opIndice;
     private String symbol;
     private String side;
@@ -28,7 +28,7 @@ public class SequenceOrder {
     private long timestampEjecucion;
     private long tiempoTranscurridoMs;
 
-    public static SequenceOrder create(String seqId, int opIndice, String symbol, String side, 
+    public static SequenceOrder create(int seqId, int opIndice, String symbol, String side, 
                               String type, double quantity, double price) {
         return SequenceOrder.builder()
                 .seqId(seqId)

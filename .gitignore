@@ -2,14 +2,17 @@
 user.apiConfig
 user.coins
 *.config
+USDTNORMAL2.coins
 
-# Binarios
-binance-arbitrage-bot/target/*.jar
+# Binarios y build
+binance-arbitrage-bot/target/
+binance-arbitrage-bot/cp.txt
 
 # Eventos y sequences (logs runtime)
 *.events
 *.sequences
 *.stats
+sequences.seq
 
 # Logs
 *.log
@@ -23,3 +26,15 @@ programa.txt
 # OS
 .DS_Store
 Thumbs.db
+
+# Scripts y archivos temporales
+cancel_orders.ps1
+query_balance.ps1
+usdt_balance.ps1
+testnet_balances.ps1
+prompt_secuencia_binance.md
+cp.txt
+
+# Agent files
+.agents/
+.claude/

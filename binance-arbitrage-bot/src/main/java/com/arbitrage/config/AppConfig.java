@@ -60,6 +60,12 @@ public class AppConfig {
     private String logLevel;       // Nivel de log (DEBUG, SCAN, INFO, WARN, ERROR)
     
     // =====================================================================
+    // SINCRONIZACION DE WALLET
+    // =====================================================================
+    @Builder.Default
+    private long walletSyncIntervalMs = 60000; // Intervalo sync wallet en ms
+    
+    // =====================================================================
     // SECUENCIA/PERSISTENCIA
     // =====================================================================
     @Builder.Default

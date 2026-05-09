@@ -48,22 +48,22 @@ public class SequenceFileManager {
     public void insert(TradingSequence sequence) throws IOException {
         fileLock.lock();
         try {
-            Map<String, TradingSequence> sequences = loadAll();
+            Map<Integer, TradingSequence> sequences = loadAll();
             sequences.put(sequence.getSeqId(), sequence);
             saveAll(sequences);
-            Log.debug(TAG, "Inserted sequence: " + sequence.getSeqId());
+            Log.debug(TAG, "Inserted sequence: #" + sequence.getSeqId());
         } finally {
             fileLock.unlock();
         }
     }
 
-    public void updateOrder(String seqId, int opIndice, SequenceOrder order) throws IOException {
+    public void updateOrder(int seqId, int opIndice, SequenceOrder order) throws IOException {
         fileLock.lock();
         try {
-            Map<String, TradingSequence> sequences = loadAll();
+            Map<Integer, TradingSequence> sequences = loadAll();
             TradingSequence seq = sequences.get(seqId);
             if (seq == null) {
-                Log.warn(TAG, "Sequence not found for update: " + seqId);
+                Log.warn(TAG, "Sequence not found for update: #" + seqId);
                 return;
             }
             
@@ -75,28 +75,28 @@ public class SequenceFileManager {
             
             sequences.put(seqId, seq);
             saveAll(sequences);
-            Log.debug(TAG, "Updated order " + opIndice + " in sequence: " + seqId);
+            Log.debug(TAG, "Updated order " + opIndice + " in sequence: #" + seqId);
         } finally {
             fileLock.unlock();
         }
     }
 
-    public void delete(String seqId) throws IOException {
+    public void delete(int seqId) throws IOException {
         fileLock.lock();
         try {
-            Map<String, TradingSequence> sequences = loadAll();
+            Map<Integer, TradingSequence> sequences = loadAll();
             if (sequences.remove(seqId) != null) {
                 saveAll(sequences);
-                Log.debug(TAG, "Deleted sequence: " + seqId);
+                Log.debug(TAG, "Deleted sequence: #" + seqId);
             } else {
-                Log.warn(TAG, "Sequence not found for delete: " + seqId);
+                Log.warn(TAG, "Sequence not found for delete: #" + seqId);
             }
         } finally {
             fileLock.unlock();
         }
     }
 
-    public Map<String, TradingSequence> loadAll() {
+    public Map<Integer, TradingSequence> loadAll() {
         Path seqPath = getSeqFilePath();
         if (!Files.exists(seqPath)) {
             Log.debug(TAG, "Sequence file does not exist, starting clean");
@@ -109,14 +109,14 @@ public class SequenceFileManager {
                 return new HashMap<>();
             }
             return objectMapper.readValue(content, 
-                objectMapper.getTypeFactory().constructMapType(Map.class, String.class, TradingSequence.class));
+                objectMapper.getTypeFactory().constructMapType(Map.class, Integer.class, TradingSequence.class));
         } catch (Exception e) {
             Log.warn(TAG, "Error reading sequence file: " + e.getMessage() + ", starting clean");
             return new HashMap<>();
         }
     }
 
-    private void saveAll(Map<String, TradingSequence> sequences) throws IOException {
+    private void saveAll(Map<Integer, TradingSequence> sequences) throws IOException {
         Path seqPath = getSeqFilePath();
         Path tempPath = Paths.get(seqPath.toString() + ".tmp");
         
@@ -152,14 +152,14 @@ public class SequenceFileManager {
                 writer.newLine();
             }
             
-            Log.debug(TAG, "Appended event for sequence: " + sequence.getSeqId());
+            Log.debug(TAG, "Appended event for sequence: #" + sequence.getSeqId());
         } finally {
             fileLock.unlock();
         }
     }
 
-    public TradingSequence findById(String seqId) {
-        Map<String, TradingSequence> sequences = loadAll();
+    public TradingSequence findById(int seqId) {
+        Map<Integer, TradingSequence> sequences = loadAll();
         return sequences.get(seqId);
     }
 
@@ -175,5 +175,53 @@ public class SequenceFileManager {
             }
         }
         return open;
+    }
+
+    public Map<String, TradingSequence> loadAllLegacy() {
+        Path seqPath = getSeqFilePath();
+        if (!Files.exists(seqPath)) {
+            Log.debug(TAG, "Sequence file does not exist, starting clean");
+            return new HashMap<>();
+        }
+
+        try {
+            String content = new String(Files.readAllBytes(seqPath));
+            if (content.trim().isEmpty()) {
+                return new HashMap<>();
+            }
+            return objectMapper.readValue(content, 
+                objectMapper.getTypeFactory().constructMapType(Map.class, String.class, TradingSequence.class));
+        } catch (Exception e) {
+            Log.warn(TAG, "Error reading legacy sequence file: " + e.getMessage() + ", starting clean");
+            return new HashMap<>();
+        }
+    }
+
+    public List<TradingSequence> findOpenLegacy() {
+        List<TradingSequence> open = new ArrayList<>();
+        for (TradingSequence seq : loadAllLegacy().values()) {
+            if (seq.getEstado() == com.arbitrage.model.EstadoSecuencia.ABIERTA) {
+                open.add(seq);
+            }
+        }
+        return open;
+    }
+
+    public void migrateLegacyToCurrent() throws IOException {
+        Map<String, TradingSequence> legacy = loadAllLegacy();
+        if (legacy.isEmpty()) {
+            Log.info(TAG, "No legacy sequences to migrate");
+            return;
+        }
+        Log.info(TAG, "Migrating " + legacy.size() + " legacy sequences");
+        
+        Map<Integer, TradingSequence> current = new HashMap<>();
+        for (TradingSequence seq : legacy.values()) {
+            seq.setSeqIdString(seq.getSeqIdString() != null ? seq.getSeqIdString() : "");
+            current.put(seq.getSeqId(), seq);
+        }
+        saveAll(current);
+        
+        Log.info(TAG, "Migration complete: " + current.size() + " sequences migrated");
     }
 }

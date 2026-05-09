@@ -41,6 +41,8 @@ public class BinanceApiClient {
 
     // Cache de filtros LOT_SIZE
     private final Map<String, Map<String, Double>> lotSizeFilters = new ConcurrentHashMap<>();
+    private final Map<String, Double> minNotionalFilters = new ConcurrentHashMap<>();
+    private final Map<String, Double> priceTickSizes = new ConcurrentHashMap<>();
     private volatile long lastFiltersLoad = 0;
     private static final long FILTERS_TTL_MS = 300000;
     
@@ -216,42 +218,139 @@ public class BinanceApiClient {
      * @return Resultado de la orden
      */
     public com.arbitrage.model.OrderResult placeOrder(String symbol, String side, String orderType, double quantity, double price) {
-        return placeOrder(symbol, side, orderType, quantity, price, false);
+        return placeOrder(symbol, side, orderType, quantity, price, 0, false);
     }
 
     /**
-     * Coloca orden real (solo si API key configurada).
+     * Coloca orden con quoteOrderQty (para MARKET orders).
      */
-    private com.arbitrage.model.OrderResult placeRealOrder(String symbol, String side, String orderType, double quantity, double price) {
-        try {
-            long timestamp = getCorrectedTimestamp();
-            
-            Map<String, String> params = new HashMap<>();
-            params.put("symbol", symbol);
-            params.put("side", side);
-            params.put("type", orderType);
-            params.put("quantity", String.format("%.8f", quantity));
-            params.put("timestamp", String.valueOf(timestamp));
-            params.put("recvWindow", String.valueOf(RECV_WINDOW));
+    public com.arbitrage.model.OrderResult placeOrder(String symbol, String side, String orderType,
+                                                      double quantity, double price, double quoteOrderQty, boolean realOrder) {
+        if (realOrder && !apiConfig.getCurrentApiKey().isEmpty()) {
+            return placeRealOrder(symbol, side, orderType, quantity, price, quoteOrderQty);
+        } else {
+            long elapsed = 48;
+            String status = apiConfig.isTestnet() ? "TESTNET_FILLED" : "SIMULATED";
+            String orderId = String.valueOf(1000000L + (long)(Math.random() * 9000000L));
 
-            if ("LIMIT".equals(orderType)) {
-                params.put("price", String.format("%.8f", price));
-                params.put("timeInForce", "GTC");
-            }
-
-            String endpoint = "/api/v3/order";
-            makeSignedRequest(endpoint, params);
-            
-            Log.info(TAG, "Orden ejecutada: " + side + " " + quantity + " " + symbol + " @ " + price);
-            
             return com.arbitrage.model.OrderResult.builder()
                     .symbol(symbol)
                     .side(side)
                     .orderType(orderType)
                     .quantity(quantity)
                     .price(price)
-                    .status("FILLED")
+                    .orderId(orderId)
+                    .status(status)
                     .success(true)
+                    .executedQty(quantity)
+                    .elapsedTime(elapsed)
+                    .build();
+        }
+    }
+
+    /**
+     * Coloca orden real (solo si API key configurada).
+     */
+    private com.arbitrage.model.OrderResult placeRealOrder(String symbol, String side, String orderType,
+                                                          double quantity, double price, double quoteOrderQty) {
+        try {
+            long timestamp = getCorrectedTimestamp();
+
+            Map<String, String> params = new HashMap<>();
+            params.put("symbol", symbol);
+            params.put("side", side);
+            params.put("type", orderType);
+            params.put("timestamp", String.valueOf(timestamp));
+            params.put("recvWindow", String.valueOf(RECV_WINDOW));
+
+            if ("MARKET".equalsIgnoreCase(orderType)) {
+                params.put("quoteOrderQty", String.format("%.8f", quoteOrderQty));
+            } else if ("LIMIT".equalsIgnoreCase(orderType)) {
+                params.put("quantity", String.format("%.8f", quantity));
+                params.put("price", String.format("%.8f", price));
+                params.put("timeInForce", "GTC");
+            } else {
+                params.put("quantity", String.format("%.8f", quantity));
+            }
+
+            Log.debug(TAG, "=== ORDER REQUEST ===");
+            Log.debug(TAG, "Symbol: " + symbol);
+            Log.debug(TAG, "Side: " + side);
+            Log.debug(TAG, "Type: " + orderType);
+            Log.debug(TAG, "quoteOrderQty: " + String.format("%.8f", quoteOrderQty));
+            Log.debug(TAG, "quantity: " + String.format("%.8f", quantity));
+            Log.debug(TAG, "price: " + String.format("%.8f", price));
+            Log.debug(TAG, "Params: " + params);
+            Log.debug(TAG, "========================");
+
+String endpoint = "/api/v3/order";
+            String response = makeSignedRequest(endpoint, params, true);
+
+            String realOrderId = null;
+            if (response != null && !response.isEmpty()) {
+                try {
+                    var json = objectMapper.readTree(response);
+                    realOrderId = String.valueOf(json.get("orderId").asLong());
+                    Log.debug(TAG, "Order placed. orderId: " + realOrderId);
+                } catch (Exception e) {
+                    Log.warn(TAG, "Could not parse order response: " + e.getMessage());
+                }
+            }
+
+            Log.debug(TAG, "Orden ejecutada: " + side + " " + quantity + " " + symbol + " @ " + price);
+
+            String orderStatus = "NEW";
+            double executedQty = 0;
+            double filledPrice = price;
+            long transactTime = 0;
+            long updateTime = 0;
+            String commissionAsset = null;
+            double commissionAmount = 0;
+            
+            if (response != null && !response.isEmpty()) {
+                try {
+                    var json = objectMapper.readTree(response);
+                    orderStatus = json.get("status").asText();
+                    executedQty = json.has("executedQty") ? json.get("executedQty").asDouble() : 0;
+                    
+                    if (json.has("transactTime")) {
+                        transactTime = json.get("transactTime").asLong();
+                    }
+                    if (json.has("updateTime")) {
+                        updateTime = json.get("updateTime").asLong();
+                    }
+                    if (json.has("price") && !json.get("price").isNull()) {
+                        filledPrice = json.get("price").asDouble();
+                    }
+                    if ("MARKET".equalsIgnoreCase(orderType) && executedQty > 0) {
+                        if (json.has("cummulativeQuoteQty")) {
+                            double quoteQty = json.get("cummulativeQuoteQty").asDouble();
+                            filledPrice = quoteQty / executedQty;
+                        }
+                    }
+                    if (json.has("commissionAsset") && !json.get("commissionAsset").isNull()) {
+                        commissionAsset = json.get("commissionAsset").asText();
+                        commissionAmount = json.has("commission") ? json.get("commission").asDouble() : 0;
+                    }
+                } catch (Exception e) {
+                    Log.warn(TAG, "Could not parse order status: " + e.getMessage());
+                }
+            }
+
+            return com.arbitrage.model.OrderResult.builder()
+                    .symbol(symbol)
+                    .side(side)
+                    .orderType(orderType)
+                    .quantity(quantity)
+                    .price(filledPrice)
+                    .orderId(realOrderId)
+                    .status(orderStatus)
+                    .success(true)
+                    .executedQty(executedQty)
+                    .transactTime(transactTime)
+                    .updateTime(updateTime)
+                    .commissionAsset(commissionAsset)
+                    .commissionAmount(commissionAmount)
                     .build();
         } catch (Exception e) {
             Log.error(TAG, "Error al ejecutar orden: " + e.getMessage());
@@ -344,6 +443,17 @@ public class BinanceApiClient {
      * @return Response JSON
      */
     public String makeSignedRequest(String endpoint, Map<String, String> params) throws Exception {
+        return makeSignedRequest(endpoint, params, false);
+    }
+
+    /**
+     * hace request firmado con metodo especificado.
+     * @param endpoint Endpoint API
+     * @param params Parametros
+     * @param forcePost true para forzar POST (para placeOrder)
+     * @return Response JSON
+     */
+    public String makeSignedRequest(String endpoint, Map<String, String> params, boolean forcePost) throws Exception {
         TreeMap<String, String> sortedParams = new TreeMap<>(params);
         StringBuilder queryBuilder = new StringBuilder();
 
@@ -358,7 +468,7 @@ public class BinanceApiClient {
         String signature = generateSignature(queryString);
         queryString += "&signature=" + signature;
 
-        boolean isPost = endpoint.equals("/api/v3/order");
+        boolean isPost = forcePost;
         return makeRequestWithMethod(endpoint, queryString, isPost);
     }
 
@@ -451,19 +561,29 @@ Log.info("Cargados " + symbols.size() + " simbolos USDT de Binance");
 
                 if (filters != null) {
                     for (var filter : filters) {
-                        if ("LOT_SIZE".equals(filter.get("filterType").asText())) {
+                        String filterType = filter.get("filterType").asText();
+                        
+                        if ("LOT_SIZE".equals(filterType)) {
                             Map<String, Double> f = new HashMap<>();
                             f.put("minQty", Double.parseDouble(filter.get("minQty").asText()));
                             f.put("maxQty", Double.parseDouble(filter.get("maxQty").asText()));
                             f.put("stepSize", Double.parseDouble(filter.get("stepSize").asText()));
                             lotSizeFilters.put(symbol, f);
-                            break;
+                        } else if ("MIN_NOTIONAL".equals(filterType)) {
+                            double minNotional = Double.parseDouble(filter.get("minNotional").asText());
+                            minNotionalFilters.put(symbol, minNotional);
+                        } else if ("NOTIONAL".equals(filterType)) {
+                            double minNotional = Double.parseDouble(filter.get("minNotional").asText());
+                            minNotionalFilters.put(symbol, minNotional);
+                        } else if ("PRICE_FILTER".equals(filterType)) {
+                            double tickSize = Double.parseDouble(filter.get("tickSize").asText());
+                            priceTickSizes.put(symbol, tickSize);
                         }
                     }
                 }
             }
             lastFiltersLoad = System.currentTimeMillis();
-            Log.debug(TAG, "Loaded LOT_SIZE filters for " + lotSizeFilters.size() + " symbols");
+            Log.debug(TAG, "Loaded LOT_SIZE for " + lotSizeFilters.size() + " symbols, MIN_NOTIONAL for " + minNotionalFilters.size() + " symbols, PRICE_FILTER for " + priceTickSizes.size() + " symbols");
         } catch (Exception e) {
             Log.error(TAG, "Error loading LOT_SIZE filters: " + e.getMessage());
         }
@@ -498,6 +618,104 @@ Log.info("Cargados " + symbols.size() + " simbolos USDT de Binance");
             return 0.00001;
         }
         return Math.floor(qty / 0.00001) * 0.00001;
+    }
+
+    public double adjustPriceToTickSize(String symbol, double price) {
+        loadExchangeInfoFilters();
+        if (symbol == null) {
+            return price;
+        }
+        Double tickSize = priceTickSizes.get(symbol);
+        if (tickSize == null || tickSize <= 0) {
+            return price;
+        }
+        return Math.round(price / tickSize) * tickSize;
+    }
+
+    public double getTickSize(String symbol) {
+        loadExchangeInfoFilters();
+        Double tickSize = priceTickSizes.get(symbol);
+        return tickSize != null ? tickSize : 0.00000001;
+    }
+
+    public double getMinNotional(String symbol) {
+        loadExchangeInfoFilters();
+        Double minNotional = minNotionalFilters.get(symbol);
+        return minNotional != null ? minNotional : 10.0;
+    }
+
+    public double getMinNotionalOrZero(String symbol) {
+        loadExchangeInfoFilters();
+        Double minNotional = minNotionalFilters.get(symbol);
+        if (minNotional != null) {
+            return minNotional;
+        }
+        return 10.0;
+    }
+
+    /**
+     * Obtiene el balance disponible de un asset específico.
+     * @param asset Nombre del asset (ej: "BNB", "USDT", "SUI")
+     * @return Balance free del asset, 0 si falla
+     */
+    public double getAssetBalance(String asset) {
+        try {
+            Map<String, String> params = new HashMap<>();
+            params.put("timestamp", String.valueOf(getCorrectedTimestamp()));
+            params.put("recvWindow", String.valueOf(RECV_WINDOW));
+
+            String response = makeSignedRequest("/api/v3/account", params);
+
+            if (response != null && !response.isEmpty()) {
+                var accountJson = objectMapper.readTree(response);
+                var balances = accountJson.get("balances");
+
+                if (balances != null && balances.isArray()) {
+                    for (var balance : balances) {
+                        if (asset.equals(balance.get("asset").asText())) {
+                            double free = Double.parseDouble(balance.get("free").asText());
+                            Log.debug(TAG, "Balance " + asset + ": " + free);
+                            return free;
+                        }
+                    }
+                }
+            }
+            Log.warn(TAG, "Asset " + asset + " not found in account");
+        } catch (Exception e) {
+            Log.warn(TAG, "Error getting balance for " + asset + ": " + e.getMessage());
+        }
+        return 0.0;
+    }
+
+    /**
+     * Extrae el base asset de un símbolo Binance.
+     * Ej: "BNBUSDT" → "BNB", "SUIBNB" → "SUI", "ETHBTC" → "ETH"
+     * @param symbol Símbolo Binance
+     * @return Base asset
+     */
+    public String extractBaseAsset(String symbol) {
+        if (symbol == null || symbol.isEmpty()) {
+            return "";
+        }
+        if (symbol.endsWith("USDT")) {
+            return symbol.substring(0, symbol.length() - 4);
+        }
+        if (symbol.endsWith("BUSD")) {
+            return symbol.substring(0, symbol.length() - 4);
+        }
+        if (symbol.endsWith("USDC")) {
+            return symbol.substring(0, symbol.length() - 4);
+        }
+        if (symbol.endsWith("BNB")) {
+            return symbol.substring(0, symbol.length() - 3);
+        }
+        if (symbol.endsWith("ETH")) {
+            return symbol.substring(0, symbol.length() - 3);
+        }
+        if (symbol.endsWith("BTC")) {
+            return symbol.substring(0, symbol.length() - 3);
+        }
+        return symbol;
     }
 
     /**
@@ -599,21 +817,34 @@ Log.info("Cargados " + symbols.size() + " simbolos USDT de Binance");
             params.put("recvWindow", String.valueOf(RECV_WINDOW));
             
             String endpoint = "/api/v3/order";
-            String response = makeSignedRequest(endpoint, params);
+            String response = makeSignedRequest(endpoint, params, false);
             
             if (response != null && !response.isEmpty()) {
                 var json = objectMapper.readTree(response);
-                
+
+                double filledPrice = json.get("price").asDouble();
+                if ("MARKET".equalsIgnoreCase(json.get("type").asText())) {
+                    double executedQty = json.get("executedQty").asDouble();
+                    if (executedQty > 0 && json.has("cummulativeQuoteQty")) {
+                        double quoteQty = json.get("cummulativeQuoteQty").asDouble();
+                        filledPrice = quoteQty / executedQty;
+                    }
+                }
+
                 return com.arbitrage.model.OrderResult.builder()
                         .symbol(json.get("symbol").asText())
                         .side(json.get("side").asText())
                         .orderId(String.valueOf(json.get("orderId").asLong()))
-                        .price(json.get("price").asDouble())
+                        .price(filledPrice)
                         .quantity(json.get("origQty").asDouble())
                         .executedQty(json.get("executedQty").asDouble())
                         .status(json.get("status").asText())
                         .orderType(json.get("type").asText())
                         .success(true)
+                        .transactTime(json.has("transactTime") ? json.get("transactTime").asLong() : 0)
+                        .updateTime(json.has("updateTime") ? json.get("updateTime").asLong() : 0)
+                        .commissionAsset(json.has("commissionAsset") && !json.get("commissionAsset").isNull() ? json.get("commissionAsset").asText() : null)
+                        .commissionAmount(json.has("commission") ? json.get("commission").asDouble() : 0)
                         .build();
             }
         } catch (Exception e) {
@@ -703,26 +934,31 @@ Log.info("Cargados " + symbols.size() + " simbolos USDT de Binance");
      */
     public com.arbitrage.model.OrderResult placeOrder(String symbol, String side, String orderType, 
                                           double quantity, double price, boolean realOrder) {
-        // Si realOrder=true y hay API key, ejecutar orden REAL (TESTNET o MAINNET)
-        if (realOrder && !apiConfig.getCurrentApiKey().isEmpty()) {
-            return placeRealOrder(symbol, side, orderType, quantity, price);
-        } else {
-            long elapsed = 48;
-            String status = apiConfig.isTestnet() ? "TESTNET_FILLED" : "SIMULATED";
-            String orderId = String.valueOf(1000000L + (long)(Math.random() * 9000000L));
-            
-            return com.arbitrage.model.OrderResult.builder()
-                    .symbol(symbol)
-                    .side(side)
-                    .orderType(orderType)
-                    .quantity(quantity)
-                    .price(price)
-                    .orderId(orderId)
-                    .status(status)
-                    .success(true)
-                    .executedQty(quantity)
-                    .elapsedTime(elapsed)
-                    .build();
+        return placeOrder(symbol, side, orderType, quantity, price, 0.0, realOrder);
+    }
+
+    public String extractQuoteAsset(String symbol) {
+        if (symbol == null || symbol.isEmpty()) {
+            return "";
         }
+        if (symbol.endsWith("USDT")) {
+            return "USDT";
+        }
+        if (symbol.endsWith("BUSD")) {
+            return "BUSD";
+        }
+        if (symbol.endsWith("USDC")) {
+            return "USDC";
+        }
+        if (symbol.endsWith("BNB")) {
+            return "BNB";
+        }
+        if (symbol.endsWith("ETH")) {
+            return "ETH";
+        }
+        if (symbol.endsWith("BTC")) {
+            return "BTC";
+        }
+        return "";
     }
 }

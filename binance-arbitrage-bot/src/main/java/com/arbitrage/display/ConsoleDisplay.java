@@ -3,6 +3,7 @@ package com.arbitrage.display;
 import com.arbitrage.config.AppConfig;
 import com.arbitrage.model.OrderResult;
 import com.arbitrage.trading.OrderExecutor;
+import com.arbitrage.trading.WalletSyncManager;
 import com.arbitrage.util.Log;
 
 import java.time.Instant;
@@ -45,6 +46,7 @@ public class ConsoleDisplay implements OrderExecutor.OpportunityDisplay {
     private int opportunityCount = 0;
     private String logLevel = "INFO";
     private final ConcurrentHashMap<Integer, ReentrantLock> sequenceLocks = new ConcurrentHashMap<>();
+    private WalletSyncManager walletSyncManager;
 
     /**
      * Muestra el dashboard inicial.
@@ -250,28 +252,28 @@ public class ConsoleDisplay implements OrderExecutor.OpportunityDisplay {
 
     /**
      * Muestra orden en estado PENDING.
-     * Formato:   BTCUSDT  BUY   Qty:   .00001225 Price:81634.45000000 Status:PENDING  ElapsedTime:--       OrderId ------    MARKET
+     * Formato:   [Seq:#1] BTCUSDT  BUY   Qty:   .00001225 Price:81634.45000000 Status:PENDING  ElapsedTime:--       OrderId ------    MARKET
      */
-    public void showOrderPending(int opNum, String symbol, String side, double qty, double price, String orderType) {
+    public void showOrderPending(int seqId, int opNum, String symbol, String side, double qty, double price, String orderType) {
         String qtyStr = formatQuantity(qty);
         String priceStr = formatPrice(price);
         
-        System.out.println("  " + String.format("%-8s", symbol) + " " + String.format("%-4s", side) + 
+        System.out.println("  [Op" + opNum + "] " + String.format("%-8s", symbol) + " " + String.format("%-4s", side) + 
             "   Qty: " + String.format("%12s", qtyStr) + " Price: " + String.format("%14s", priceStr) + 
             " Status:PENDING" + "   ElapsedTime:--       " + " OrderId ------    " + orderType);
     }
 
     /**
      * Muestra orden en estado FILLED.
-     * Formato:   BTCUSDT  BUY   Qty:   .00001225 Price:81634.45000000 Status:FILLED   ElapsedTime:48ms       OrderId 9978256    MARKET
+     * Formato:   [Seq:#1] BTCUSDT  BUY   Qty:   .00001225 Price:81634.45000000 Status:FILLED   ElapsedTime:48ms       OrderId 9978256    MARKET
      */
-    public void showOrderFilled(OrderResult r) {
+    public void showOrderFilled(int seqId, int opNum, OrderResult r) {
         String qtyStr = formatQuantity(r.getQuantity());
         String priceStr = formatPrice(r.getPrice());
         String statusStr = r.getStatus();
         String statusColor = "FILLED".equals(statusStr) ? ANSI_GREEN : (("CANCELED".equals(statusStr) || "REJECTED".equals(statusStr) || "EXPIRED".equals(statusStr)) ? ANSI_YELLOW : ANSI_WHITE);
         
-        System.out.println("  " + String.format("%-8s", r.getSymbol()) + " " + String.format("%-4s", r.getSide()) + 
+        System.out.println("  [Op" + opNum + "] " + String.format("%-8s", r.getSymbol()) + " " + String.format("%-4s", r.getSide()) + 
             "   Qty: " + String.format("%12s", qtyStr) + " Price: " + String.format("%14s", priceStr) + 
             " Status:" + statusColor + statusStr + ANSI_WHITE + 
             "   ElapsedTime:" + r.getElapsedTime() + "ms       " + " OrderId " + 
@@ -299,14 +301,33 @@ public class ConsoleDisplay implements OrderExecutor.OpportunityDisplay {
         lock.lock();
         try {
             showStart(sequenceId, timestamp, profitPct, live);
+            int opNum = 1;
             for (OrderResult r : orders) {
-                showOrderFilled(r);
+                showOrderFilled(sequenceId, opNum++, r);
             }
             showEnd(sequenceId, true, profitPct);
         } finally {
             lock.unlock();
             sequenceLocks.remove(sequenceId);
         }
+    }
+
+    // =====================================================================
+    // WALLET SYNC
+    // =====================================================================
+
+    public void setWalletSyncManager(WalletSyncManager wsm) {
+        this.walletSyncManager = wsm;
+        if (wsm != null) {
+            wsm.addListener(this::onBalancesUpdated);
+            setBalances(wsm.getUsdtBalance(), wsm.getBnbBalance(), wsm.getBnbPrice());
+        }
+    }
+
+    private void onBalancesUpdated(double usdt, double bnb, double bnbPrice) {
+        this.balanceUSDT = usdt;
+        this.balanceBNB = bnb;
+        this.bnbPrice = bnbPrice;
     }
 
     // =====================================================================

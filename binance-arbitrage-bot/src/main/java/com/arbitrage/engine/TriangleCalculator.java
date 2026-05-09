@@ -105,6 +105,19 @@ public class TriangleCalculator {
         }
         return validSymbols.contains(symbol1) && 
                validSymbols.contains(symbol2) && 
-               validSymbols.contains(symbol3);
+               validSymbols.contains(symbol3) &&
+               !isPerpetualFuture(symbol1) &&
+               !isPerpetualFuture(symbol2) &&
+               !isPerpetualFuture(symbol3);
+    }
+
+    private boolean isPerpetualFuture(String symbol) {
+        if (symbol.contains("_")) return true;
+        if (symbol.matches(".*USD\\d+$")) return true;
+        if (symbol.contains("USD1") || symbol.contains("USD2") || symbol.contains("USD3")) return true;
+        if (symbol.matches(".*BTCUSD\\d+.*")) return true;
+        if (symbol.matches(".*ETHUSD\\d+.*")) return true;
+        if (symbol.matches(".*SOLUSD\\d+.*")) return true;
+        return false;
     }
 }

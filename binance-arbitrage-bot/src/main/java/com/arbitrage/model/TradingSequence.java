@@ -13,7 +13,15 @@ import java.util.List;
 @NoArgsConstructor
 @AllArgsConstructor
 public class TradingSequence {
-    private String seqId;
+    private int seqId;
+    
+    private static int idCounter = 0;
+    private static synchronized int generateSeqId() {
+        return ++idCounter;
+    }
+    
+    @JsonIgnore
+    private String seqIdString;  // Para compatibilidad con formato legacy (UUID)
     private String triangleId;
     private String modo;
     private EstadoSecuencia estado;
@@ -29,7 +37,7 @@ public class TradingSequence {
 
     public static TradingSequence create(String triangleId, String modo, double profitEsperado, 
                                    String monedaBase, double montoBase) {
-        String seqId = java.util.UUID.randomUUID().toString();
+        int seqId = generateSeqId();
         long now = System.currentTimeMillis();
         
         return TradingSequence.builder()
@@ -89,5 +97,40 @@ public class TradingSequence {
     public void markError() {
         this.estado = EstadoSecuencia.ERROR;
         this.timestampFin = System.currentTimeMillis();
+    }
+
+    public void markCancelled() {
+        this.estado = EstadoSecuencia.CANCELADA;
+        this.timestampFin = System.currentTimeMillis();
+    }
+    
+    public void setSeqIdString(String seqId) {
+        this.seqIdString = seqId;
+    }
+    
+    public String getSeqIdString() {
+        return seqIdString;
+    }
+    
+    @JsonIgnore
+    public int getEffectiveSeqId() {
+        return seqId > 0 ? seqId : (seqIdString != null ? seqIdString.hashCode() : 0);
+    }
+    
+    @JsonIgnore
+    public boolean isLegacyFormat() {
+        return seqIdString != null && seqId == 0;
+    }
+    
+    @JsonIgnore
+    public int getNextPendingOpIndex() {
+        if (op1 == null || !op1.isFilled()) return 1;
+        if (op2 == null || !op2.isFilled()) return 2;
+        if (op3 == null || !op3.isFilled()) return 3;
+        return 4;  // Todas completadas
+    }
+    
+    public boolean hasOp1BeenSent() {
+        return op1 != null && op1.getBinanceOrderId() != null && !op1.getBinanceOrderId().isEmpty();
     }
 }

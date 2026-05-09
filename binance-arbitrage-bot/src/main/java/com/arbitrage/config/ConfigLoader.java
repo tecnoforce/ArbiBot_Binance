@@ -119,6 +119,9 @@ public class ConfigLoader {
                     case "ordertimeout":
                         builder.orderTimeoutMs(Long.parseLong(value));
                         break;
+                    case "walletsyncinterval":
+                        builder.walletSyncIntervalMs(Long.parseLong(value));
+                        break;
                 }
             }
         }
