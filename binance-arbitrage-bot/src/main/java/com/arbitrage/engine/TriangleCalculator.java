@@ -72,7 +72,7 @@ public class TriangleCalculator {
                 }
                 
                 String symbol1Reverse = coinB + baseCurrency;
-                String symbol2Reverse = coinB + coinA;
+                String symbol2Reverse = coinA + coinB;
                 String symbol3Reverse = coinA + baseCurrency;
                 
                 boolean reverseValid = isTriangleValid(symbol1Reverse, symbol2Reverse, symbol3Reverse, validSymbols);

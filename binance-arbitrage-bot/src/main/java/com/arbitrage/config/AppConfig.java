@@ -76,4 +76,14 @@ public class AppConfig {
     private String sequencesFile = "sequences.seq";
     @Builder.Default
     private String eventsFile = "sequences.events";
+    
+    // =====================================================================
+    // GESTIÓN DE RIESGO
+    // =====================================================================
+    @Builder.Default
+    private double dailyLossLimit = 50.0;    // Pérdida diaria máxima en USD
+    @Builder.Default
+    private boolean dailyLossCheckEnabled = true; // Verificar pérdida diaria
+    @Builder.Default
+    private long dailyLossCheckIntervalMs = 60000; // Intervalo check pérdida diaria en ms
 }

@@ -6,13 +6,13 @@ Este archivo define las instrucciones para agentes de IA que trabajan en el proy
 
 ```powershell
 # Eliminar JAR antigua (OBLIGATORIO antes de recompilar)
-Remove-Item D:\ARBITRAJE_BOT\BOT_Nuevo_V1\binance-arbitrage-bot\target\*.jar -ErrorAction SilentlyContinue
+Remove-Item D:\ARBITRAJE_BOT\BOT_Nuevo_V4-J21\binance-arbitrage-bot\target\*.jar -ErrorAction SilentlyContinue
 
 # Compilar
-mvn package -DskipTests -f D:\ARBITRAJE_BOT\BOT_Nuevo_V1\binance-arbitrage-bot\pom.xml
+mvn package -DskipTests -f D:\ARBITRAJE_BOT\BOT_Nuevo_V4-J21\binance-arbitrage-bot\pom.xml
 
 # Ejecutar
-java -jar D:\ARBITRAJE_BOT\BOT_Nuevo_V1\binance-arbitrage-bot\target\binance-arbitrage-bot-1.0.0.jar
+java -jar D:\ARBITRAJE_BOT\BOT_Nuevo_V4-J21\binance-arbitrage-bot\target\binance-arbitrage-bot-1.4.1.jar
 ```
 
 **Nota crítica**: Maven puede cachear el JAR viejo. Siempre eliminarlo antes de compilar.

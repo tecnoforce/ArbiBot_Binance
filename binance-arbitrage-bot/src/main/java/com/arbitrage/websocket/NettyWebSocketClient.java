@@ -222,8 +222,8 @@ public class NettyWebSocketClient {
         @Override
         protected void handleTextFrame(ChannelHandlerContext ctx, TextWebSocketFrame frame) throws Exception {
             messageCount++;
-            ByteBuf buf = frame.content();
-            priceHandler.handlePriceUpdate(buf);
+            String message = frame.toString();
+            priceHandler.handlePriceUpdate(message);
         }
 
         @Override

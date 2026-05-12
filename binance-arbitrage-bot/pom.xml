@@ -6,15 +6,16 @@
 
     <groupId>com.arbitrage</groupId>
     <artifactId>binance-arbitrage-bot</artifactId>
-    <version>1.0.0</version>
+    <version>1.4.1</version>
     <packaging>jar</packaging>
 
     <name>Binance Triangular Arbitrage Bot</name>
     <description>Triangular Arbitrage Bot for Binance Spot Market - Simulation Only</description>
 
     <properties>
-        <maven.compiler.source>11</maven.compiler.source>
-        <maven.compiler.target>11</maven.compiler.target>
+        <maven.compiler.source>21</maven.compiler.source>
+        <maven.compiler.target>21</maven.compiler.target>
+        <maven.compiler.release>21</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     </properties>
 
@@ -62,10 +63,11 @@
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
-                <version>3.13.0</version>
+                <version>3.15.0</version>
                 <configuration>
-                    <source>11</source>
-                    <target>11</target>
+                    <source>21</source>
+                    <target>21</target>
+                    <release>21</release>
                 </configuration>
             </plugin>
             <plugin>

@@ -4,6 +4,7 @@ import com.arbitrage.config.AppConfig;
 import com.arbitrage.model.*;
 import com.arbitrage.persistence.SequenceFileManager;
 import com.arbitrage.util.Log;
+import com.arbitrage.util.StatsManager;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -29,6 +30,7 @@ public class OrderExecutor {
 
     private SequenceDisplay sequenceDisplay;
     private WalletSyncManager walletSyncManager;
+    private StatsManager statsManager;
     private volatile long lastWarningTime = 0;
     private static final long WARNING_INTERVAL_MS = 5000;
 
@@ -62,6 +64,10 @@ public class OrderExecutor {
 
     public void setWalletSyncManager(WalletSyncManager wsm) {
         this.walletSyncManager = wsm;
+    }
+
+    public void setStatsManager(StatsManager statsManager) {
+        this.statsManager = statsManager;
     }
 
     public void execute(ArbitrageOpportunity opportunity) {
@@ -143,6 +149,11 @@ public class OrderExecutor {
             sequenceDisplay.showOrderStatus(seqId, 2, symbol2, side2, r2.getExecutedQty(), r2.getPrice(), "FILLED", now - op2Sent, r2.getOrderId(), orderType2);
             sequenceDisplay.showOrderStatus(seqId, 3, symbol3, side3, r3.getExecutedQty(), r3.getPrice(), "FILLED", now - op3Sent, r3.getOrderId(), orderType3);
             sequenceDisplay.showEnd(seqId, true, profitPct);
+        }
+
+        if (statsManager != null) {
+            double profitSimulado = profitPct / 100.0 * config.getBalancePerTrade();
+            statsManager.recordCompleted(profitSimulado);
         }
     }
 
@@ -231,11 +242,11 @@ if (sequenceDisplay != null) {
             double adjPrice2 = apiClient.adjustPriceToTickSize(symbol2, price2);
             double adjPrice3 = apiClient.adjustPriceToTickSize(symbol3, price3);
 
-            if (sequenceDisplay != null) {
-                sequenceDisplay.showOrderStatus(seqIdNum, 1, symbol1, side1, adjQty1, adjPrice1, "WAITING", -1, "------", orderType1);
-                sequenceDisplay.showOrderStatus(seqIdNum, 2, symbol2, side2, adjQty2, adjPrice2, "WAITING", -1, "------", orderType2);
-                sequenceDisplay.showOrderStatus(seqIdNum, 3, symbol3, side3, adjQty3, adjPrice3, "WAITING", -1, "------", orderType3);
-            }
+            // if (sequenceDisplay != null) {
+            //     sequenceDisplay.showOrderStatus(seqIdNum, 1, symbol1, side1, adjQty1, adjPrice1, "WAITING", -1, "------", orderType1);
+            //     sequenceDisplay.showOrderStatus(seqIdNum, 2, symbol2, side2, adjQty2, adjPrice2, "WAITING", -1, "------", orderType2);
+            //     sequenceDisplay.showOrderStatus(seqIdNum, 3, symbol3, side3, adjQty3, adjPrice3, "WAITING", -1, "------", orderType3);
+            // }
 
             double availableUsdt = apiClient.getAssetBalance("USDT");
             if (availableUsdt < config.getBalancePerTrade()) {
@@ -307,7 +318,7 @@ if (sequenceDisplay != null) {
 
             String baseAsset2 = apiClient.extractBaseAsset(symbol2);
             double availableBase2 = apiClient.getAssetBalance(baseAsset2);
-            double minRequired = adjQty2 * 1.05;
+            double minRequired = adjQty2 * 1.01;
             if (minRequired > availableBase2) {
                 String error = "Insufficient " + baseAsset2 + " for Op2. Need: " + String.format("%.8f", minRequired) + ", Have: " + String.format("%.8f", availableBase2);
                 Log.warn(TAG, error);
@@ -426,6 +437,10 @@ if (sequenceDisplay != null) {
 
             sequence.close(profitRealizado);
 
+            if (statsManager != null) {
+                statsManager.recordCompleted(profitRealizado);
+            }
+
             fileManager.delete(seqIdNum);
             fileManager.appendEvent(sequence);
 
@@ -437,8 +452,9 @@ if (sequenceDisplay != null) {
             }
 
         } catch (Exception e) {
-            Log.error(TAG, "Error in sequence: " + e.getMessage());
-            handleSequenceError(seqIdNum, e.getMessage());
+            String msg = e.getMessage() != null ? e.getMessage() : e.toString();
+            Log.error(TAG, "Error in sequence: " + msg);
+            handleSequenceError(seqIdNum, msg);
         }
     }
 
@@ -481,20 +497,21 @@ if (sequenceDisplay != null) {
                 return new double[]{adjQty1, adjStep2, adjStep3};
             } else {
                 double afterFee1 = adjQty1 * (1 - feeOp1);
-                double adjStep2 = apiClient.adjustQuantityToLotSize(symbol2, afterFee1);
-                if (adjStep2 < afterFee1 * 0.5) {
-                    Log.warn(TAG, "LOT_SIZE step 2 adjustment too aggressive: " + afterFee1 + " -> " + adjStep2);
+                double step2Raw = afterFee1 / price2;
+                double adjStep2 = apiClient.adjustQuantityToLotSize(symbol2, step2Raw);
+                if (adjStep2 < step2Raw * 0.5) {
+                    Log.warn(TAG, "LOT_SIZE step 2 adjustment too aggressive: " + step2Raw + " -> " + adjStep2);
                     return null;
                 }
 
                 double minNotional2 = apiClient.getMinNotionalOrZero(symbol2);
-                if (minNotional2 > 0.0 && adjStep2 * price2 * price3 < minNotional2) {
-                    double minStep2 = apiClient.adjustQuantityToLotSize(symbol2, minNotional2 / (price2 * price3));
+                if (minNotional2 > 0.0 && adjStep2 * price2 < minNotional2) {
+                    double minStep2 = apiClient.adjustQuantityToLotSize(symbol2, minNotional2 / price2);
                     adjStep2 = Math.max(adjStep2, minStep2);
                 }
 
-                double bnbReceived = adjStep2 * price2;
-                double afterFee2 = bnbReceived * (1 - feeOp2);
+                double bnbReceived = adjStep2 * (1 - feeOp2);
+                double afterFee2 = bnbReceived;
                 double adjStep3 = apiClient.adjustQuantityToLotSize(symbol3, afterFee2);
                 if (adjStep3 < afterFee2 * 0.5) {
                     Log.warn(TAG, "LOT_SIZE step 3 adjustment too aggressive: " + afterFee2 + " -> " + adjStep3);
@@ -510,7 +527,7 @@ if (sequenceDisplay != null) {
                 return new double[]{adjQty1, adjStep2, adjStep3};
             }
         } catch (Exception e) {
-            Log.warn(TAG, "Error recalculating chain: " + e.getMessage());
+            Log.warn(TAG, "Error recalculating chain: " + (e.getMessage() != null ? e.getMessage() : e.toString()));
             return null;
         }
     }
@@ -556,22 +573,23 @@ if (sequenceDisplay != null) {
                 return new double[]{adjStep2, adjStep3};
             } else {
                 double afterFee1 = executedQty1 * (1 - feeOp1);
-                double adjStep2 = apiClient.adjustQuantityToLotSize(symbol2, afterFee1);
-                if (adjStep2 < afterFee1 * 0.5) {
-                    Log.warn(TAG, "AfterOp1 step 2 adjustment too aggressive: " + afterFee1 + " -> " + adjStep2);
+                double step2Raw = afterFee1 / price2;
+                double adjStep2 = apiClient.adjustQuantityToLotSize(symbol2, step2Raw);
+                if (adjStep2 < step2Raw * 0.5) {
+                    Log.warn(TAG, "AfterOp1 step 2 adjustment too aggressive: " + step2Raw + " -> " + adjStep2);
                     return null;
                 }
 
                 double minNotional2 = apiClient.getMinNotionalOrZero(symbol2);
-                if (minNotional2 > 0.0 && adjStep2 * price2 * price3 < minNotional2) {
-                    double requiredQty = apiClient.adjustQuantityToLotSize(symbol2, (minNotional2 * 3.0) / (price2 * price3));
+                if (minNotional2 > 0.0 && adjStep2 * price2 < minNotional2) {
+                    double requiredQty = apiClient.adjustQuantityToLotSize(symbol2, (minNotional2 * 3.0) / price2);
                     if (adjStep2 < requiredQty) {
                         adjStep2 = requiredQty;
                     }
                 }
 
-                double bnbReceived = adjStep2 * price2;
-                double afterFee2 = bnbReceived * (1 - feeOp2);
+                double bnbReceived = adjStep2 * (1 - feeOp2);
+                double afterFee2 = bnbReceived;
                 double adjStep3 = apiClient.adjustQuantityToLotSize(symbol3, afterFee2);
                 if (adjStep3 < afterFee2 * 0.5) {
                     Log.warn(TAG, "AfterOp1 step 3 adjustment too aggressive: " + afterFee2 + " -> " + adjStep3);
@@ -589,7 +607,7 @@ if (sequenceDisplay != null) {
                 return new double[]{adjStep2, adjStep3};
             }
         } catch (Exception e) {
-            Log.warn(TAG, "Error recalculating after OP1: " + e.getMessage());
+            Log.warn(TAG, "Error recalculating after OP1: " + (e.getMessage() != null ? e.getMessage() : e.toString()));
             return null;
         }
     }
@@ -667,11 +685,35 @@ if (sequenceDisplay != null) {
         }
     }
 
+    private void handleSequenceErrorForRecovery(TradingSequence sequence, String errorMessage) {
+        int seqId = sequence.getSeqId();
+        if (sequenceDisplay != null) {
+            sequenceDisplay.showSequenceEstado(seqId, "CANCELED");
+            sequenceDisplay.showEnd(seqId, false, sequence.getProfitEsperado());
+        }
+        try {
+            if (statsManager != null) {
+                statsManager.recordCancelled();
+            }
+            completeSequenceData(sequence, errorMessage);
+            sequence.markCancelled();
+            fileManager.appendEvent(sequence);
+            fileManager.delete(seqId);
+            Log.error(TAG, "[RECOVERY] #" + seqId + " error handled: " + errorMessage);
+        } catch (Exception e) {
+            Log.error(TAG, "[RECOVERY] #" + seqId + " error handling error: " + e.getMessage());
+        }
+    }
+
     private void handleSequenceError(int seqId, String errorMessage) {
         if (sequenceDisplay != null) {
             sequenceDisplay.showSequenceEstado(seqId, "CANCELED");
         }
         try {
+            if (statsManager != null) {
+                statsManager.recordCancelled();
+            }
+
             TradingSequence sequence = fileManager.findById(seqId);
             if (sequence != null) {
                 completeSequenceData(sequence, errorMessage);
@@ -748,6 +790,286 @@ if (sequenceDisplay != null) {
     public void shutdown() {
         executor.shutdown();
         pollingExecutor.shutdown();
+    }
+
+    public void launchRecovery(List<TradingSequence> sequences) {
+        if (sequences == null) {
+            Log.warn(TAG, "[RECOVERY] pending sequences is NULL");
+            return;
+        }
+        if (sequences.isEmpty()) {
+            Log.info(TAG, "[RECOVERY] No pending sequences to recover");
+            return;
+        }
+        Log.info(TAG, "[RECOVERY] Launching " + sequences.size() + " pending sequences in background");
+        Log.info(TAG, "[RECOVERY] SequenceDisplay is " + (sequenceDisplay != null ? "SET" : "NULL"));
+        for (TradingSequence seq : sequences) {
+            openTrades.incrementAndGet();
+            Log.info(TAG, "[RECOVERY] Submitting seqId=" + seq.getSeqId() + " nextOp=" + seq.getNextPendingOpIndex());
+            executor.submit(() -> {
+                try {
+                    continueSequence(seq);
+                } catch (Exception e) {
+                    Log.error(TAG, "[RECOVERY] Error in recovery thread: " + (e.getMessage() != null ? e.getMessage() : e.toString()));
+                } finally {
+                    openTrades.decrementAndGet();
+                }
+            });
+        }
+    }
+
+    private void continueSequence(TradingSequence sequence) {
+        int seqId = sequence.getSeqId();
+        long startTime = sequence.getTimestampInicio();
+        double profitEsperado = sequence.getProfitEsperado();
+
+        Log.info(TAG, "[RECOVERY] #" + seqId + " continueSequence() called, display=" + (sequenceDisplay != null));
+
+        if (sequenceDisplay != null) {
+            Log.info(TAG, "[RECOVERY] #" + seqId + " Calling showStart and showSequenceEstado");
+            sequenceDisplay.showStart(seqId, startTime, profitEsperado, true);
+            sequenceDisplay.showSequenceEstado(seqId, "ABIERTA");
+        } else {
+            Log.error(TAG, "[RECOVERY] #" + seqId + " sequenceDisplay is NULL!");
+        }
+
+        Log.debug(TAG, "[RECOVERY] #" + seqId + " Starting recovery for: " + sequence.getTriangleId());
+
+        try {
+            int nextOp = sequence.getNextPendingOpIndex();
+
+            String orderType1 = config.getTypeOp1();
+            String orderType2 = config.getTypeOp2();
+            String orderType3 = config.getTypeOp3();
+
+            SequenceOrder op1 = sequence.getOp1();
+            SequenceOrder op2 = sequence.getOp2();
+            SequenceOrder op3 = sequence.getOp3();
+
+            if (sequenceDisplay != null) {
+                displayRecoveryOp(seqId, 1, op1, orderType1, nextOp);
+                displayRecoveryOp(seqId, 2, op2, orderType2, nextOp);
+                displayRecoveryOp(seqId, 3, op3, orderType3, nextOp);
+            }
+
+            if (nextOp > 3) {
+                Log.warn(TAG, "[RECOVERY] #" + seqId + " Sequence already completed");
+                sequence.close(sequence.getProfitRealizado());
+                handleSequenceErrorForRecovery(sequence, "Already completed");
+                return;
+            }
+
+            if (nextOp <= 1 && !processRecoveryOp(sequence, 1, orderType1, nextOp)) return;
+            if (nextOp <= 2 && !processRecoveryOp(sequence, 2, orderType2, nextOp)) return;
+            if (!processRecoveryOp(sequence, 3, orderType3, nextOp)) return;
+
+            if (op3 != null && op3.isFilled()) {
+                double finalQty = op3.getCantidadEjecutada();
+                double finalPrice = op3.getPrecioEjecutado();
+                double receivedUsdt = finalQty * finalPrice;
+                double profitRealizado = receivedUsdt - config.getBalancePerTrade();
+
+                sequence.close(profitRealizado);
+                Log.info(TAG, "[RECOVERY] #" + seqId + " Sequence completed, profit=" + String.format("%.4f", profitRealizado));
+
+                if (statsManager != null) {
+                    statsManager.recordCompleted(profitRealizado);
+                }
+                if (sequenceDisplay != null) {
+                    sequenceDisplay.showSequenceEstado(seqId, "CERRADA");
+                    sequenceDisplay.showEnd(seqId, true, profitEsperado);
+                }
+                fileManager.delete(seqId);
+                fileManager.appendEvent(sequence);
+            }
+
+        } catch (Exception e) {
+            String msg = e.getMessage() != null ? e.getMessage() : e.toString();
+            Log.error(TAG, "[RECOVERY] #" + seqId + " Recovery error: " + msg);
+            handleSequenceErrorForRecovery(sequence, "Recovery error: " + msg);
+        }
+    }
+
+    private void displayRecoveryOp(int seqId, int opIndex, SequenceOrder orden, String orderType, int nextPendingOp) {
+        String symbol = "";
+        String side = "";
+        double qty = 0;
+        double price = 0;
+        String status = "WAITING";
+        long elapsed = 0;
+        String orderId = "------";
+
+        if (orden != null) {
+            symbol = orden.getSymbol() != null ? orden.getSymbol() : "";
+            side = orden.getSide() != null ? orden.getSide() : "";
+            qty = orden.getQuantity();
+            price = orden.getPrecioEjecutado() > 0 ? orden.getPrecioEjecutado() : orden.getPrice();
+
+            if (orden.isFilled()) {
+                status = "FILLED";
+                qty = orden.getCantidadEjecutada();
+                price = orden.getPrecioEjecutado();
+                elapsed = orden.getTiempoTranscurridoMs();
+                orderId = orden.getBinanceOrderId() != null ? orden.getBinanceOrderId() : "------";
+            } else if (orden.getBinanceOrderId() != null && !orden.getBinanceOrderId().isEmpty()) {
+                status = "OPENED";
+                orderId = orden.getBinanceOrderId();
+            }
+        }
+
+        if (sequenceDisplay != null) {
+            sequenceDisplay.showOrderStatus(seqId, opIndex, symbol, side, qty, price, status, elapsed, orderId, orderType);
+        }
+    }
+
+    private boolean processRecoveryOp(TradingSequence sequence, int opIndex, String orderType, int nextPendingOp) {
+        int seqId = sequence.getSeqId();
+        SequenceOrder orden = sequence.getOrden(opIndex);
+
+        if (orden == null) {
+            Log.warn(TAG, "[RECOVERY] #" + seqId + " OP" + opIndex + " never created");
+            handleSequenceErrorForRecovery(sequence, "OP" + opIndex + " never created");
+            return false;
+        }
+
+        String orderId = orden.getBinanceOrderId();
+        String symbol = orden.getSymbol();
+        String side = orden.getSide();
+
+        if (orderId == null || orderId.isEmpty()) {
+            Log.warn(TAG, "[RECOVERY] #" + seqId + " OP" + opIndex + " never sent to Binance, attempting to place now");
+            double qty = orden.getQuantity();
+            double savedPrice = orden.getPrice();
+            double price = savedPrice > 0 ? savedPrice : 0;
+            if (price <= 0) {
+                try {
+                    double marketPrice = apiClient.getSymbolPrice(symbol);
+                    price = apiClient.adjustPriceToTickSize(symbol, marketPrice);
+                    Log.info(TAG, "[RECOVERY] #" + seqId + " Using market price for " + symbol + ": " + price);
+                } catch (Exception e) {
+                    Log.error(TAG, "[RECOVERY] #" + seqId + " Could not get market price: " + e.getMessage());
+                    handleSequenceErrorForRecovery(sequence, "OP" + opIndex + " no price available");
+                    return false;
+                }
+            }
+            if (qty <= 0) {
+                Log.error(TAG, "[RECOVERY] #" + seqId + " OP" + opIndex + " invalid qty=" + qty + ", aborting");
+                handleSequenceErrorForRecovery(sequence, "OP" + opIndex + " invalid qty=" + qty);
+                return false;
+            }
+            try {
+                OrderResult placed = apiClient.placeOrder(symbol, side, orderType, qty, price, config.getBalancePerTrade(), realOrder);
+                if (!placed.isSuccess()) {
+                    Log.error(TAG, "[RECOVERY] #" + seqId + " OP" + opIndex + " place failed: " + placed.getErrorMessage());
+                    handleSequenceErrorForRecovery(sequence, "OP" + opIndex + " place failed: " + placed.getErrorMessage());
+                    return false;
+                }
+                String newOrderId = placed.getOrderId();
+                Log.info(TAG, "[RECOVERY] #" + seqId + " OP" + opIndex + " placed: orderId=" + newOrderId);
+                orden.setBinanceOrderId(newOrderId);
+                orden.setOrderStatus(EstadoOrden.PENDING);
+                try {
+                    fileManager.updateOrder(seqId, opIndex, orden);
+                } catch (Exception e) {
+                    Log.error(TAG, "[RECOVERY] #" + seqId + " Error persisting order: " + e.getMessage());
+                }
+                if (sequenceDisplay != null) {
+                    sequenceDisplay.showOrderStatus(seqId, opIndex, symbol, side, qty, price, "OPENED", 0, newOrderId, orderType);
+                }
+                if ("FILLED".equals(placed.getStatus())) {
+                    updateRecoveryOrder(seqId, opIndex, orden, placed, newOrderId, orderType, sequence);
+                    return true;
+                }
+                orderId = newOrderId;
+            } catch (Exception e) {
+                String emsg = e.getMessage() != null ? e.getMessage() : e.toString();
+                Log.error(TAG, "[RECOVERY] #" + seqId + " OP" + opIndex + " place exception: " + emsg);
+                handleSequenceErrorForRecovery(sequence, "OP" + opIndex + " place error: " + emsg);
+                return false;
+            }
+        }
+
+        if (orden.isFinal()) {
+            return true;
+        }
+
+        Log.debug(TAG, "[RECOVERY] #" + seqId + " Polling OP" + opIndex + " orderId=" + orderId);
+
+        OrderResult status = apiClient.queryOrder(symbol, orderId);
+        String orderStatus = status.getStatus();
+
+        if ("FILLED".equals(orderStatus)) {
+            updateRecoveryOrder(seqId, opIndex, orden, status, orderId, orderType, sequence);
+            return true;
+        }
+
+        if ("CANCELED".equals(orderStatus) || "REJECTED".equals(orderStatus) || "EXPIRED".equals(orderStatus)) {
+            orden.setOrderStatus(EstadoOrden.valueOf(orderStatus));
+            orden.setTimestampEjecucion(System.currentTimeMillis());
+            orden.setTiempoTranscurridoMs(System.currentTimeMillis() - orden.getTimestampCreacion());
+            try {
+                fileManager.updateOrder(seqId, opIndex, orden);
+            } catch (Exception e) {
+                Log.error(TAG, "[RECOVERY] #" + seqId + " Error persisting order: " + e.getMessage());
+            }
+            if (sequenceDisplay != null) {
+                sequenceDisplay.showOrderStatus(seqId, opIndex, symbol, side,
+                    orden.getCantidadEjecutada(), orden.getPrecioEjecutado(), orderStatus,
+                    orden.getTiempoTranscurridoMs(), orderId, orderType);
+            }
+            handleSequenceErrorForRecovery(sequence, "OP" + opIndex + " " + orderStatus);
+            return false;
+        }
+
+        Log.debug(TAG, "[RECOVERY] #" + seqId + " OP" + opIndex + " still " + orderStatus + ", waiting...");
+        return true;
+    }
+
+    private void updateRecoveryOrder(int seqId, int opIndex, SequenceOrder orden, OrderResult status,
+                                    String orderId, String orderType, TradingSequence sequence) {
+        orden.setOrderStatus(EstadoOrden.FILLED);
+        orden.setCantidadEjecutada(status.getExecutedQty());
+        orden.setPrecioEjecutado(status.getPrice());
+        orden.setBinanceOrderId(orderId);
+        orden.setTimestampEjecucion(status.getUpdateTime());
+        orden.setTiempoTranscurridoMs(status.getUpdateTime() > 0 && status.getTransactTime() > 0
+            ? status.getUpdateTime() - status.getTransactTime()
+            : status.getElapsedTime());
+        orden.setComisionAsset(status.getCommissionAsset());
+        orden.setComisionMonto(status.getCommissionAmount());
+        try {
+            fileManager.updateOrder(seqId, opIndex, orden);
+        } catch (Exception e) {
+            Log.error(TAG, "[RECOVERY] #" + seqId + " Error persisting order: " + e.getMessage());
+        }
+
+        String symbol = orden.getSymbol();
+        String side = orden.getSide();
+
+        if (sequenceDisplay != null) {
+            sequenceDisplay.showOrderStatus(seqId, opIndex, symbol, side,
+                status.getExecutedQty(), status.getPrice(), "FILLED",
+                orden.getTiempoTranscurridoMs(), orderId, orderType);
+        }
+
+        Log.debug(TAG, "[RECOVERY] #" + seqId + " OP" + opIndex + " FILLED");
+
+        if (opIndex == 1) {
+            double executedQty1 = status.getExecutedQty();
+            String symbol2 = sequence.getOp2() != null ? sequence.getOp2().getSymbol() : "";
+            String symbol3 = sequence.getOp3() != null ? sequence.getOp3().getSymbol() : "";
+            double price2 = sequence.getOp2() != null ? sequence.getOp2().getPrecioEjecutado() : 0.0;
+            double price3 = sequence.getOp3() != null ? sequence.getOp3().getPrecioEjecutado() : 0.0;
+            boolean isForward = sequence.getTriangleId().contains("USDT->");
+
+            double[] recalc = recalculateChainAfterOp1(executedQty1, symbol2, symbol3, price2, price3, isForward);
+            if (recalc != null && sequence.getOp2() != null) {
+                sequence.getOp2().setQuantity(recalc[0]);
+                if (sequence.getOp3() != null) {
+                    sequence.getOp3().setQuantity(recalc[1]);
+                }
+            }
+        }
     }
 
     public interface SequenceDisplay {

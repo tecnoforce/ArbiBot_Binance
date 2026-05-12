@@ -40,7 +40,7 @@ mvn package -DskipTests -f binance-arbitrage-bot\pom.xml
 ## Ejecución
 
 ```powershell
-java -jar binance-arbitrage-bot\target\binance-arbitrage-bot-1.0.0.jar
+java -jar binance-arbitrage-bot\target\binance-arbitrage-bot-1.4.1.jar
 ```
 
 ## Estructura del proyecto

@@ -45,13 +45,13 @@ public class RestPriceFallback {
     }
 
     public void start() {
-        if (!config.isRestFallbackEnabled()) {
+        if (!config.isDailyLossCheckEnabled()) {
             Log.info(TAG, "REST fallback DISABLED (feature flag)");
             return;
         }
 
         running = true;
-        long interval = config.getRestFallbackIntervalMs();
+        long interval = config.getDailyLossCheckIntervalMs();
 
         Log.info(TAG, "REST fallback ENABLED - polling interval: " + interval + "ms");
         Log.info(TAG, "Target symbols: " + targetSymbols.size());
@@ -98,35 +98,10 @@ public class RestPriceFallback {
                         .askQty(0.0)
                         .build();
             }
+            return null;
         } catch (Exception e) {
-            // Silently ignore - symbol may not exist
+            Log.debug(TAG, "Error fetching price for " + symbol + ": " + e.getMessage());
+            return null;
         }
-        return null;
-    }
-
-    public void stop() {
-        running = false;
-        scheduler.shutdown();
-        Log.info(TAG, "REST fallback stopped");
-    }
-
-    public int getMissingCount() {
-        int missing = 0;
-        for (String symbol : targetSymbols) {
-            if (!priceMap.containsKey(symbol)) {
-                missing++;
-            }
-        }
-        return missing;
-    }
-
-    public int getFetchedCount() {
-        int fetched = 0;
-        for (String symbol : targetSymbols) {
-            if (priceMap.containsKey(symbol)) {
-                fetched++;
-            }
-        }
-        return fetched;
     }
 }

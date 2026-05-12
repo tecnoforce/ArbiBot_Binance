@@ -86,7 +86,7 @@ public class ConsoleDisplay implements OrderExecutor.OpportunityDisplay {
 
         System.out.println();
         System.out.println(ANSI_CYAN + "================================================================================" + ANSI_RESET);
-        System.out.println(ANSI_CYAN + "  Binance Triangular Arbitrage Bot v1.0.0" + ANSI_RESET);
+        System.out.println(ANSI_CYAN + "  Binance Triangular Arbitrage Bot v1.4.1" + ANSI_RESET);
         System.out.println(ANSI_CYAN + "================================================================================" + ANSI_RESET);
         
         System.out.println(ANSI_WHITE + "  Log Level   : " + ANSI_YELLOW + logLevel + ANSI_RESET);

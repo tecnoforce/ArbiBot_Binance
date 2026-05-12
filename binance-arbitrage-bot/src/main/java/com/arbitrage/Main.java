@@ -14,6 +14,7 @@ import com.arbitrage.trading.BinanceApiClient;
 import com.arbitrage.trading.OrderExecutor;
 import com.arbitrage.trading.WalletSyncManager;
 import com.arbitrage.util.Log;
+import com.arbitrage.util.StatsManager;
 import com.arbitrage.websocket.BinanceWebSocketClient;
 import com.arbitrage.websocket.PriceUpdateHandler;
 import org.slf4j.Logger;
@@ -39,6 +40,7 @@ public class Main {
         String configFile = "USDTNORMAL2.config";
         String apiConfigFile = "user.apiConfig";
         String coinsFile = "USDTNORMAL2.coins";
+        String statsFile = "USDTNORMAL2.stats";
 
         for (int i = 0; i < args.length; i++) {
             if (args[i].equals("--config") && i + 1 < args.length) {
@@ -80,7 +82,7 @@ public class Main {
             String logLevel = config.getLogLevel();
             Log.init((logLevel != null && !logLevel.isEmpty()) ? logLevel : "INFO");
             boolean isScanMode = "SCAN".equals(Log.getCurrentLevel());
-            
+
             if (!isScanMode) {
                 Log.print("\n=== BINANCE ARBITRAGE BOT ===");
                 Log.print("Log Level: " + Log.getCurrentLevel());
@@ -91,11 +93,11 @@ public class Main {
             if (!isScanMode) {
                 System.out.println("Credenciales API cargadas desde: " + apiConfigFile);
             }
-            
+
             ApiConfig apiConfig = ConfigLoader.loadApiConfig(apiConfigFile);
             boolean isTestnet = apiConfig.isTestnet();
             String envName = NetworkEndpoints.getEnvironmentName(isTestnet);
-            
+
             if (!isScanMode) {
                 System.out.println("Entorno detectado: " + envName);
             }
@@ -103,26 +105,28 @@ public class Main {
             // Crear apiClient para llamadas API
             BinanceApiClient apiClient = new BinanceApiClient(apiConfig);
             Set<String> allBinanceSymbols = apiClient.getAllSymbols();
-            
+
             // Cargar simbolos:不同的 lógica para TESTNET vs MAINNET
             List<String> coins = new ArrayList<>();
             String finalBaseCurrency = config.getBaseCurrency();
-            
+
             if (isTestnet) {
                 String testnetCoinsFile = basePath + File.separator + "testnet.coins";
                 File testnetFile = new File(testnetCoinsFile);
-                
+
                 if (testnetFile.exists()) {
                     // Cargar desde archivo existente
                     System.out.println("Cargando desde testnet.coins...");
                     List<String> pairList = ConfigLoader.loadCoins(testnetCoinsFile);
                     coins = new ArrayList<>();
                     for (String pair : pairList) {
-                        if (pair.length() > 4 && !pair.equals("USDTUSDT") && !pair.equals("BTCBTC") && !pair.equals("BNBBNB")) {
+                        if (pair.length() > 4 && !pair.equals("USDTUSDT") && !pair.equals("BTCBTC")
+                                && !pair.equals("BNBBNB")) {
                             String base = pair.substring(pair.length() - 4);
                             if (base.equals("USDT") || base.equals("BTC") || base.equals("BNB")) {
                                 String coin = pair.substring(0, pair.length() - 4);
-                                if (!coin.isEmpty()) coins.add(coin);
+                                if (!coin.isEmpty())
+                                    coins.add(coin);
                             }
                         }
                     }
@@ -130,17 +134,16 @@ public class Main {
                 } else {
                     // Generar desde Binance API
                     System.out.println("testnet.coins no existe - Generando desde Binance...");
-                    
+
                     int requestedCoins = apiConfig.getTestnetCoins();
                     List<String> usdtSymbols = apiClient.getUsdtSymbolsByVolume(requestedCoins);
                     System.out.println("Obtenidos " + usdtSymbols.size() + " símbolos USDT por volumen");
-                    
+
                     // Filtrar stablecoins
                     Set<String> stableCoins = new HashSet<>(Set.of(
-                        "USDT", "USDC", "FDUSD", "DAI", "TUSD", 
-                        "BUSD", "USDP", "PAXG", "EUR", "GBP"
-                    ));
-                    
+                            "USDT", "USDC", "FDUSD", "DAI", "TUSD",
+                            "BUSD", "USDP", "PAXG", "EUR", "GBP"));
+
                     List<String> rawCoins = new ArrayList<>();
                     for (String symbol : usdtSymbols) {
                         if (symbol.endsWith("USDT") && !symbol.equals("USDTUSDT")) {
@@ -150,7 +153,7 @@ public class Main {
                             }
                         }
                     }
-                    
+
                     // Calcular límite de streams (n + n*(n-1)/2 <= 200)
                     int effectiveCoins = Math.min(requestedCoins, rawCoins.size());
                     while (effectiveCoins > 5 && effectiveCoins + (effectiveCoins * (effectiveCoins - 1)) / 2 > 200) {
@@ -158,7 +161,8 @@ public class Main {
                     }
                     effectiveCoins = Math.min(effectiveCoins, rawCoins.size());
                     coins = rawCoins.subList(0, effectiveCoins);
-                    System.out.println("Filtradas a " + coins.size() + " monedas (streams: " + (effectiveCoins + effectiveCoins * (effectiveCoins - 1) / 2) + ")");
+                    System.out.println("Filtradas a " + coins.size() + " monedas (streams: "
+                            + (effectiveCoins + effectiveCoins * (effectiveCoins - 1) / 2) + ")");
                 }
             } else {
                 // MAINNET: cargar desde archivo
@@ -174,7 +178,7 @@ public class Main {
                 }
                 System.out.println("Cargadas " + coins.size() + " monedas desde " + coinsFile);
             }
-            
+
             // Validar que las monedas tengan pares existentes con las diferentes bases
             List<String> validCoins = new ArrayList<>();
             for (String coin : coins) {
@@ -185,19 +189,20 @@ public class Main {
                         break;
                     }
                 }
-                if (hasPair) validCoins.add(coin);
+                if (hasPair)
+                    validCoins.add(coin);
             }
             coins = validCoins;
             System.out.println("Monedas válidas después de validar pares: " + coins.size());
-            
+
             // Fallback: intentar con USDT, luego BTC, luego BNB
             List<String> baseCurrencies = Arrays.asList("USDT", "BTC", "BNB");
             List<Triangle> triangles = new ArrayList<>();
-            
+
             for (String base : baseCurrencies) {
                 TriangleCalculator calculator = new TriangleCalculator(base);
                 triangles = calculator.buildTriangles(coins, allBinanceSymbols);
-                
+
                 if (!triangles.isEmpty()) {
                     finalBaseCurrency = base;
                     System.out.println("Triángulos encontrados con base " + base + ": " + triangles.size());
@@ -206,7 +211,7 @@ public class Main {
                     System.out.println("Sin triángulos con base " + base + ", intentando siguiente...");
                 }
             }
-            
+
             // Si ninguna base funciona, usar archivo de mainnet
             if (triangles.isEmpty()) {
                 System.out.println("WARNING: Sin triángulos con monedas generadas - usando archivo mainnet");
@@ -215,7 +220,8 @@ public class Main {
                 for (String pair : pairList) {
                     if (pair.endsWith("USDT") && !pair.equals("USDTUSDT")) {
                         String coin = pair.replace("USDT", "");
-                        if (!coin.isEmpty()) coins.add(coin);
+                        if (!coin.isEmpty())
+                            coins.add(coin);
                     }
                 }
                 // Intentar de nuevo
@@ -224,12 +230,13 @@ public class Main {
                     triangles = calculator.buildTriangles(coins, allBinanceSymbols);
                     if (!triangles.isEmpty()) {
                         finalBaseCurrency = base;
-                        System.out.println("Triángulos encontrados con base " + base + " (fallback): " + triangles.size());
+                        System.out.println(
+                                "Triángulos encontrados con base " + base + " (fallback): " + triangles.size());
                         break;
                     }
                 }
             }
-            
+
             if (!isScanMode) {
                 System.out.println("DEBUG: baseCurrency=" + finalBaseCurrency);
                 System.out.println("Triangulos construidos: " + triangles.size());
@@ -248,12 +255,13 @@ public class Main {
                         writer.println(coin);
                     }
                     writer.close();
-                    System.out.println("Monedas testnet guardadas en: " + testnetCoinsFile + " (base: " + finalBaseCurrency + ")");
+                    System.out.println(
+                            "Monedas testnet guardadas en: " + testnetCoinsFile + " (base: " + finalBaseCurrency + ")");
                 } catch (IOException e) {
                     System.out.println("Error guardando monedas testnet: " + e.getMessage());
                 }
             }
-            
+
             // Guardar triangulos en archivo triangulos.txt
             String trianglesFile = basePath + File.separator + "triangulos.txt";
             try {
@@ -278,78 +286,79 @@ public class Main {
             }
 
             if (!isScanMode) {
-                System.out.println("Construidos " + triangles.size() + " triangulos para moneda base: " + finalBaseCurrency);
+                System.out.println(
+                        "Construidos " + triangles.size() + " triangulos para moneda base: " + finalBaseCurrency);
                 System.out.println("Conectando a WebSocket de Binance " + envName + "...");
             }
 
             PriceUpdateHandler priceHandler = new PriceUpdateHandler(priceMap);
             BinanceWebSocketClient wsClient = new BinanceWebSocketClient(apiConfig, priceHandler);
-            
+
             // Construir lista de streams solo con simbolos de triangulos validos
             Set<String> streamSymbols = new HashSet<>();
-            
+
             for (Triangle t : triangles) {
                 streamSymbols.add(t.getSymbol1());
                 streamSymbols.add(t.getSymbol2());
                 streamSymbols.add(t.getSymbol3());
             }
-            
+
             List<String> streamsList = new ArrayList<>(streamSymbols);
-            
+
             if (!isScanMode) {
                 System.out.println("Suscribiendo a " + streamsList.size() + " streams validos...");
             }
-            
+
             wsClient.connectAndSubscribe(streamsList);
             Thread.sleep(2000);
             boolean connected = wsClient.isConnected();
-            
+
             if (!isScanMode) {
                 System.out.println("Conectado al stream de Binance! WebSocket abierto");
             }
-            
+
             display.setConnectionStatus(connected);
             display.setTestnet(isTestnet);
 
             WalletSyncManager walletSync = new WalletSyncManager(apiClient, config.getWalletSyncIntervalMs());
             display.setWalletSyncManager(walletSync);
             display.updateOpportunityCount(triangles.size());
+
+            StatsManager statsManager = new StatsManager(basePath, statsFile, finalBaseCurrency,
+                    walletSync.getUsdtBalance());
             display.showDashboard(config, connected, isTestnet,
-                walletSync.getUsdtBalance(), walletSync.getBnbBalance(),
-                walletSync.getBnbPrice(), config.getLogLevel());
+                    walletSync.getUsdtBalance(), walletSync.getBnbBalance(),
+                    walletSync.getBnbPrice(), config.getLogLevel());
 
             if (!isScanMode) {
                 System.out.println();
                 System.out.println("WebSocket conectado. Suscrito a " + coins.size() + " streams.");
-                
+
                 String streams = coins.stream()
-                    .map(c -> c.toLowerCase() + "@bookTicker")
-                    .collect(Collectors.joining("/"));
+                        .map(c -> c.toLowerCase() + "@bookTicker")
+                        .collect(Collectors.joining("/"));
                 String wsEndpoint = NetworkEndpoints.buildWebSocketUrl(isTestnet, streams);
-                String tradeMode = isTestnet ? "TESTNET" : (config.isRealorder() ? "MAINNET-LIVE" : "MAINNET-SIMULATED");
-                
-                System.out.println("Endpoint WebSocket: " + wsEndpoint.substring(0, Math.min(60, wsEndpoint.length())) + "...");
-                System.out.println("Modo: " + tradeMode + " | Balance por trade: " + config.getBalancePerTrade() + " " + config.getBaseCurrency() + " | Min profit: " + config.getMinProfit() + "%");
+                String tradeMode = isTestnet ? "TESTNET"
+                        : (config.isRealorder() ? "MAINNET-LIVE" : "MAINNET-SIMULATED");
+
+                System.out.println(
+                        "Endpoint WebSocket: " + wsEndpoint.substring(0, Math.min(60, wsEndpoint.length())) + "...");
+                System.out.println("Modo: " + tradeMode + " | Balance por trade: " + config.getBalancePerTrade() + " "
+                        + config.getBaseCurrency() + " | Min profit: " + config.getMinProfit() + "%");
                 System.out.println("Motor de arbitraje iniciado. Buscando oportunidades...");
             }
 
-            // Crear SequenceFileManager solo para ordenes reales
-            com.arbitrage.persistence.SequenceFileManager seqFileManager = null;
+            // Crear SequenceFileManager para recovery
+            com.arbitrage.persistence.SequenceFileManager seqFileManager = new com.arbitrage.persistence.SequenceFileManager(
+                    basePath);
             if (config.isRealorder()) {
-                seqFileManager = new com.arbitrage.persistence.SequenceFileManager(basePath);
                 Log.info("Sequence persistence enabled for real orders");
             }
 
             OrderExecutor orderExecutor = new OrderExecutor(config, apiClient, seqFileManager);
             orderExecutor.setWalletSyncManager(walletSync);
-            
-            if (config.isRealorder() && seqFileManager != null) {
-                com.arbitrage.persistence.SequenceRecoveryManager recovery = 
-                    new com.arbitrage.persistence.SequenceRecoveryManager(apiClient, seqFileManager, orderExecutor, config);
-                recovery.loadAndRecoverSequences();
-            }
-            
-orderExecutor.setSequenceDisplay(new OrderExecutor.SequenceDisplay() {
+            orderExecutor.setStatsManager(statsManager);
+            orderExecutor.setSequenceDisplay(new OrderExecutor.SequenceDisplay() {
 
                 class OrderState {
                     String symbol = "";
@@ -373,7 +382,8 @@ orderExecutor.setSequenceDisplay(new OrderExecutor.SequenceDisplay() {
                     String estadoTag = null;
                     boolean estadoTagPrinted = false;
                     {
-                        for (int i = 0; i < 3; i++) orders[i] = new OrderState();
+                        for (int i = 0; i < 3; i++)
+                            orders[i] = new OrderState();
                     }
                 }
 
@@ -385,7 +395,8 @@ orderExecutor.setSequenceDisplay(new OrderExecutor.SequenceDisplay() {
                 }
 
                 private String fmtTime(long ts) {
-                    if (ts <= 0) return "--";
+                    if (ts <= 0)
+                        return "--";
                     long now = System.currentTimeMillis();
                     long elapsed = now - ts;
                     return elapsed + "ms";
@@ -393,13 +404,17 @@ orderExecutor.setSequenceDisplay(new OrderExecutor.SequenceDisplay() {
 
                 private String colorForStatus(String status) {
                     switch (status) {
-                        case "FILLED":   return "\u001B[32m";
-                        case "OPENED":   return "\u001B[36m";
+                        case "FILLED":
+                            return "\u001B[32m";
+                        case "OPENED":
+                            return "\u001B[36m";
                         case "CANCELED":
                         case "REJECTED":
                         case "EXPIRED":
-                        case "ERROR":    return "\u001B[31m";
-                        default:         return "\u001B[37m";
+                        case "ERROR":
+                            return "\u001B[31m";
+                        default:
+                            return "\u001B[37m";
                     }
                 }
 
@@ -407,26 +422,31 @@ orderExecutor.setSequenceDisplay(new OrderExecutor.SequenceDisplay() {
                     String qtyStr = fmtQty(o.qty);
                     String priceStr = String.format("%.8f", o.price);
                     String elapsedStr = fmtTime(o.sentTime);
-                    String orderIdStr = ("------".equals(o.orderId) || o.orderId == null || o.orderId.isEmpty()) ? "------" : o.orderId;
+                    String orderIdStr = ("------".equals(o.orderId) || o.orderId == null || o.orderId.isEmpty())
+                            ? "------"
+                            : o.orderId;
                     String statusColor = colorForStatus(o.status);
-                    return statusColor + String.format("  [Op%d] %-8s %-5s Qty:%12s Price:%14s Status:%-9s ElapsedTime:%s OrderId %-10s %s",
-                        opNum, o.symbol, o.side, qtyStr, priceStr, o.status, elapsedStr, orderIdStr, o.orderType) + "\u001B[37m";
+                    return statusColor + String.format(
+                            "  [Op%d] %-8s %-5s Qty:%12s Price:%14s Status:%-9s ElapsedTime:%s OrderId %-10s %s",
+                            opNum, o.symbol, o.side, qtyStr, priceStr, o.status, elapsedStr, orderIdStr, o.orderType)
+                            + "\u001B[37m";
                 }
 
                 private void printBlock(SeqState s) {
                     java.time.LocalDateTime dt = java.time.LocalDateTime.ofInstant(
-                        java.time.Instant.ofEpochMilli(s.startTime), java.time.ZoneId.systemDefault());
+                            java.time.Instant.ofEpochMilli(s.startTime), java.time.ZoneId.systemDefault());
                     String timeStr = dt.format(java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss"));
                     String mode = s.live ? "LIVE" : "SIMULATED";
                     String estadoTagStr = (!s.estadoTagPrinted && s.estadoTag != null)
-                        ? " (" + s.estadoTag + ")"
-                        : "";
+                            ? " (" + s.estadoTag + ")"
+                            : "";
                     System.out.println();
                     System.out.println("SeqId (#" + s.seqId + ") --> " + timeStr + " (" + mode + ")" + estadoTagStr);
                     for (int i = 0; i < 3; i++) {
                         System.out.println(formatOrderLine(s.orders[i], i + 1));
                     }
-                    String profitColor = s.profitPct > 0 ? "\u001B[32m" : (s.profitPct < 0 ? "\u001B[33m" : "\u001B[37m");
+                    String profitColor = s.profitPct > 0 ? "\u001B[32m"
+                            : (s.profitPct < 0 ? "\u001B[33m" : "\u001B[37m");
                     System.out.println("profit= " + profitColor + String.format("%.4f", s.profitPct) + "%\u001B[37m");
                     if (!s.estadoTagPrinted && s.estadoTag != null) {
                         s.estadoTagPrinted = true;
@@ -447,11 +467,17 @@ orderExecutor.setSequenceDisplay(new OrderExecutor.SequenceDisplay() {
                 }
 
                 @Override
-                public void showOrderPending(int seqId, int opNum, String symbol, String side, double qty, double price, String orderType) {
+                public void showOrderPending(int seqId, int opNum, String symbol, String side, double qty, double price,
+                        String orderType) {
                 }
 
                 @Override
                 public void showOrderFilled(int seqId, int opNum, OrderResult r) {
+                    String st = r.getStatus();
+                    if ("OPEN".equals(st) || "NEW".equals(st))
+                        st = "OPENED";
+                    showOrderStatus(seqId, opNum, r.getSymbol(), r.getSide(), r.getQuantity(), r.getPrice(),
+                            st, r.getElapsedTime(), r.getOrderId(), r.getOrderType());
                 }
 
                 @Override
@@ -459,13 +485,15 @@ orderExecutor.setSequenceDisplay(new OrderExecutor.SequenceDisplay() {
                 }
 
                 @Override
-                public void printSequenceAtomic(int sequenceId, long timestamp, boolean live, java.util.List<OrderResult> orders, double profitPct) {
+                public void printSequenceAtomic(int sequenceId, long timestamp, boolean live,
+                        java.util.List<OrderResult> orders, double profitPct) {
                 }
 
                 @Override
                 public void showSequenceEstado(int seqId, String estado) {
                     SeqState s = seqStates.get(seqId);
-                    if (s == null) return;
+                    if (s == null)
+                        return;
                     s.estadoTag = estado;
                     s.estadoTagPrinted = false;
                 }
@@ -487,11 +515,12 @@ orderExecutor.setSequenceDisplay(new OrderExecutor.SequenceDisplay() {
                     boolean statusChanged = !s.orders[idx].status.equals(status);
                     boolean orderIdChanged = !s.orders[idx].orderId.equals(orderId);
                     boolean dataChanged = statusChanged || orderIdChanged ||
-                        !s.orders[idx].symbol.equals(symbol) ||
-                        Math.abs(s.orders[idx].qty - qty) > 1e-10 ||
-                        Math.abs(s.orders[idx].price - price) > 1e-10;
+                            !s.orders[idx].symbol.equals(symbol) ||
+                            Math.abs(s.orders[idx].qty - qty) > 1e-10 ||
+                            Math.abs(s.orders[idx].price - price) > 1e-10;
 
-                    if (!dataChanged) return;
+                    if (!dataChanged)
+                        return;
 
                     s.orders[idx].symbol = symbol;
                     s.orders[idx].side = side;
@@ -512,18 +541,25 @@ orderExecutor.setSequenceDisplay(new OrderExecutor.SequenceDisplay() {
                 }
             });
 
+            if (seqFileManager != null) {
+                com.arbitrage.persistence.SequenceRecoveryManager recovery = new com.arbitrage.persistence.SequenceRecoveryManager(
+                        apiClient, seqFileManager, orderExecutor, config, statsManager);
+                java.util.List<com.arbitrage.model.TradingSequence> pending = recovery.loadAndRecoverSequences();
+                orderExecutor.launchRecovery(pending);
+            }
+
             ArbitrageEngine engine = new ArbitrageEngine(
-                config,
-                triangles,
-                priceMap,
-                opportunity -> orderExecutor.execute(opportunity)
-            );
+                    config,
+                    triangles,
+                    priceMap,
+                    opportunity -> orderExecutor.execute(opportunity));
             engine.start();
 
             walletSync.start();
 
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
                 Log.print("=== SHUTDOWN ===");
+                statsManager.save();
                 engine.stop();
                 walletSync.stop();
                 wsClient.close();

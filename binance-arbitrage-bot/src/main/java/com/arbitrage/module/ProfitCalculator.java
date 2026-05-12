@@ -134,13 +134,13 @@ public class ProfitCalculator {
         double step1AfterFee = step1Qty * (1.0 - feeOp1 / 100.0);
 
         if (isForward) {
-            step2Qty = (step1AfterFee / effectivePrice1) * effectivePrice2;
+            step2Qty = step1AfterFee / effectivePrice2;
             step2AfterFee = step2Qty * (1.0 - feeOp2 / 100.0);
-            step3Qty = step2AfterFee / effectivePrice3;
+            step3Qty = step2AfterFee * effectivePrice3;
         } else {
-            step2Qty = (step1AfterFee / effectivePrice1) * effectivePrice2;
+            step2Qty = step1AfterFee * effectivePrice2;
             step2AfterFee = step2Qty * (1.0 - feeOp2 / 100.0);
-            step3Qty = step2AfterFee / effectivePrice3;
+            step3Qty = step2AfterFee;
         }
 
         step3Price = effectivePrice3;

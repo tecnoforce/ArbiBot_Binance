@@ -52,7 +52,7 @@ public class RiskManager {
     private static final long VIOLATION_COOLDOWN_MS = 5000;
 
     public RiskManager(AppConfig config) {
-        this(config, 1000.0, (config != null ? config.getDailyLoss() : 50.0), 5.0, 0.0);
+        this(config, 1000.0, (config != null ? config.getDailyLossLimit() : 50.0), 5.0, 0.0);
     }
 
     public RiskManager(AppConfig config, double maxExposure, double dailyLoss, double maxDrawdown, double emergencyThreshold) {

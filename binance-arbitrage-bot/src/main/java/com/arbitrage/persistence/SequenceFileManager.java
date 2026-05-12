@@ -3,6 +3,7 @@ package com.arbitrage.persistence;
 import com.arbitrage.model.SequenceOrder;
 import com.arbitrage.model.TradingSequence;
 import com.arbitrage.util.Log;
+import com.arbitrage.util.SequenceFormatter;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
@@ -142,14 +143,13 @@ public class SequenceFileManager {
         fileLock.lock();
         try {
             Path eventsPath = getEventsFilePath();
-            String json = objectMapper.writeValueAsString(sequence);
+            String formatted = SequenceFormatter.formatEvent(sequence);
             
             try (BufferedWriter writer = new BufferedWriter(
                     new OutputStreamWriter(Files.newOutputStream(eventsPath, 
                         StandardOpenOption.CREATE, StandardOpenOption.APPEND), 
                         java.nio.charset.StandardCharsets.UTF_8))) {
-                writer.write(json);
-                writer.newLine();
+                writer.write(formatted);
             }
             
             Log.debug(TAG, "Appended event for sequence: #" + sequence.getSeqId());

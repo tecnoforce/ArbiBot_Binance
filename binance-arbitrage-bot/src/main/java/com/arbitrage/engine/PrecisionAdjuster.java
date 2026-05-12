@@ -45,7 +45,7 @@ public class PrecisionAdjuster {
 
         if (isForward) {
             double afterFee1 = adjQty1 * (1 - feeOp1 / 100.0);
-            double step2Raw = (afterFee1 / price1) * price2;
+            double step2Raw = afterFee1 / price2;
             double adjStep2 = apiClient.adjustQuantityToLotSize(symbol2, step2Raw);
 
             if (!validateStep(symbol2, adjStep2, adjPrice2)) {
@@ -53,7 +53,7 @@ public class PrecisionAdjuster {
             }
 
             double afterFee2 = adjStep2 * (1 - feeOp2 / 100.0);
-            double step3Raw = afterFee2 / price3;
+            double step3Raw = afterFee2 * price3;
             double adjStep3 = apiClient.adjustQuantityToLotSize(symbol3, step3Raw);
 
             if (!validateStep(symbol3, adjStep3, adjPrice3)) {
@@ -64,7 +64,7 @@ public class PrecisionAdjuster {
             adjQty3 = adjStep3;
         } else {
             double afterFee1 = adjQty1 * (1 - feeOp1 / 100.0);
-            double step2Raw = (afterFee1 / price1) * price2;
+            double step2Raw = afterFee1 * price2;
             double adjStep2 = apiClient.adjustQuantityToLotSize(symbol2, step2Raw);
 
             double adjPrice2Check = apiClient.adjustPriceToTickSize(symbol2, price2);
@@ -73,7 +73,7 @@ public class PrecisionAdjuster {
             }
 
             double afterFee2 = adjStep2 * (1 - feeOp2 / 100.0);
-            double step3Raw = afterFee2 / price3;
+            double step3Raw = afterFee2;
             double adjStep3 = apiClient.adjustQuantityToLotSize(symbol3, step3Raw);
 
             if (!validateStep(symbol3, adjStep3, adjPrice3)) {
