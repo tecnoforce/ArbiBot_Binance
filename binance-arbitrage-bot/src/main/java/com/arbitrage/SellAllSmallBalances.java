@@ -9,7 +9,19 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import java.util.HashSet;
 import java.util.Set;
 
+/**
+ * Herramienta independiente para vender todos los saldos peque&ntilde;os
+ * (menores a 10000 unidades) de la wallet TESTNET a USDT.
+ * <p>
+ * Uso: ejecutar directamente. Requiere {@code ../user.apiConfig}.
+ * Obtiene todos los balances de la cuenta, filtra activos con saldo &gt; 0
+ * y &lt; 10000, excluye stablecoins y monedas fiduciarias, y ejecuta
+ * una orden MARKET de venta por cada uno contra USDT.
+ * Incluye una pausa de 200ms entre &oacute;rdenes para evitar rate limiting.
+ * </p>
+ */
 public class SellAllSmallBalances {
+    // Lista de stablecoins conocidas que NO deben venderse (se usan como base de trading)
     private static final Set<String> STABLECOINS = new HashSet<>();
     
     static {
@@ -38,6 +50,7 @@ public class SellAllSmallBalances {
         STABLECOINS.add("RLUSD");
     }
     
+    // Lista de monedas fiduciarias y otros activos a excluir de la venta
     private static final Set<String> EXCLUDE = new HashSet<>();
     
     static {
@@ -102,38 +115,53 @@ public class SellAllSmallBalances {
         EXCLUDE.add("ZAR");
     }
     
+    /**
+     * Punto de entrada. Obtiene todos los balances, filtra activos peque&ntilde;os
+     * no-stablecoin no-fiat, y ejecuta una orden MARKET de venta por cada uno.
+     *
+     * @param args Argumentos (no utilizados)
+     */
     public static void main(String[] args) {
         try {
+            // Cargar credenciales y crear cliente API
             ApiConfig apiConfig = ConfigLoader.loadApiConfig("../user.apiConfig");
             BinanceApiClient client = new BinanceApiClient(apiConfig);
             
             System.out.println("=== VENDER TODOS LOS SALDOS < 10000 (TESTNET) ===\n");
             
+            // Mapper para parsear la respuesta JSON del endpoint /api/v3/account
             ObjectMapper mapper = new ObjectMapper();
+            // Parametros para la llamada firmada
             java.util.Map<String, String> params = new java.util.HashMap<>();
             params.put("timestamp", String.valueOf(System.currentTimeMillis()));
             params.put("recvWindow", "60000");
             
             String response = client.makeSignedRequest("/api/v3/account", params);
             
+            // Procesar la respuesta y filtrar activos con saldo > 0 y < 10000
             if (response != null) {
                 var accountJson = mapper.readTree(response);
                 var balances = (ArrayNode) accountJson.get("balances");
                 
+                // Contadores para el resumen final
                 int successCount = 0;
                 int failCount = 0;
                 double totalSold = 0;
                 
+                // Iterar sobre todos los balances de la cuenta
                 for (var balance : balances) {
                     String asset = balance.get("asset").asText();
                     double free = Double.parseDouble(balance.get("free").asText());
                     double locked = Double.parseDouble(balance.get("locked").asText());
                     double total = free + locked;
                     
+                    // Filtrar: saldo positivo, < 10000, no stablecoin, no fiat
                     if (total > 0 && total < 10000 && !STABLECOINS.contains(asset) && !EXCLUDE.contains(asset)) {
                         String symbol = asset + "USDT";
+                        // Obtener precio actual del par contra USDT
                         double price = client.getSymbolPrice(symbol);
                         
+                        // Si no tiene precio USDT, saltar
                         if (price <= 0) {
                             System.out.println("SKIP " + asset + " - Sin precio USDT");
                             continue;
@@ -141,6 +169,7 @@ public class SellAllSmallBalances {
                         
                         System.out.println("Vendiendo " + asset + " (" + total + ") @ " + price + " = " + (total * price) + " USDT");
                         
+                        // Ejecutar orden MARKET de venta del saldo completo
                         try {
                             OrderResult result = client.placeOrder(symbol, "SELL", "MARKET", total, price, total * price, true);
                             
@@ -157,6 +186,7 @@ public class SellAllSmallBalances {
                             failCount++;
                         }
                         
+                        // Pausa de 200ms entre ordenes para evitar rate limiting de Binance
                         Thread.sleep(200);
                     }
                 }

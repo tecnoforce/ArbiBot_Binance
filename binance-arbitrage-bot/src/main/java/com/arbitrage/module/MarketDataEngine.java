@@ -17,40 +17,77 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 
 /**
- * MarketDataEngine - Gestiona todos los datos de mercado.
+ * MarketDataEngine - Gestion centralizada de datos de mercado en tiempo real.
  *
  * Responsabilidades:
- * - Conectar a Binance WebSocket para precios en tiempo real
- * - Proveer fallback REST para simbolos faltantes
- * - Abstraer acceso a datos de precios para otros modulos
- * - Tracking de frescura y calidad de datos
+ * - Conectar a WebSocket de Binance para recibir precios en tiempo real
+ * - Mantener un ConcurrentHashMap<String, Ticker> actualizado constantemente
+ * - Proveer fallback REST para simbolos que no llegan por WebSocket
+ * - Abstraer acceso a precios: bid, ask, mid, frescura de datos
+ * - Tracking de calidad de conexion: simbolos disponibles, ausentes, stale
+ * - Permitir suscripcion/cancelacion dinamica de simbolos
+ *
+ * Flujo de datos:
+ *   WebSocket (PriceUpdateHandler) -> priceMap
+ *   REST Fallback (RestPriceFallback) -> priceMap (simbolos faltantes)
+ *   MarketDataEngine.getTicker() / getPrice() -> consumidores
+ *
+ * Integracion: Componente central que provee datos de precios a ArbitrageDetector,
+ *              ProfitCalculator, ExecutionEngine y RepricingEngine.
+ *              Todos los modulos leen del mismo priceMap compartido.
  *
  * Backward compatible: coexiste con BinanceWebSocketClient existente
  */
 public class MarketDataEngine {
+    /** Tag para logging */
     private static final String TAG = "MktData";
 
+    /** Configuración de API keys y endpoints */
     private final ApiConfig apiConfig;
+    /** Cliente REST de Binance (usado para fallback y consultas directas) */
     private final BinanceApiClient apiClient;
+    /** Mapa compartido de precios (symbol → Ticker), actualizado por WS y REST */
     private final ConcurrentHashMap<String, Ticker> priceMap;
 
+    /** Cliente WebSocket de Binance */
     private BinanceWebSocketClient wsClient;
+    /** Manejador de actualizaciones de precio vía WebSocket */
     private PriceUpdateHandler priceHandler;
+    /** Mecanismo de fallback por REST para símbolos sin WebSocket */
     private RestPriceFallback restFallback;
 
+    /** Conjunto de símbolos suscritos actualmente */
     private final Set<String> subscribedSymbols;
+    /** Contador de mensajes recibidos (WebSocket + actualizaciones manuales) */
     private final AtomicInteger messageCount;
+    /** Timestamp de la última actualización de precio recibida */
     private final AtomicLong lastUpdateTime;
+    /** Flag de conexión WebSocket activa */
     private volatile boolean connected = false;
+    /** Flag de inicialización completada */
     private volatile boolean initialized = false;
 
+    /** Intervalo de polling del fallback REST (ms) */
     private final long restFallbackIntervalMs;
+    /** Si el fallback REST está habilitado */
     private final boolean restFallbackEnabled;
 
+    /**
+     * Constructor simplificado con priceMap nuevo, fallback cada 2000ms habilitado.
+     */
     public MarketDataEngine(ApiConfig apiConfig, BinanceApiClient apiClient) {
         this(apiConfig, apiClient, new ConcurrentHashMap<>(), 2000, true);
     }
 
+    /**
+     * Constructor completo del motor de datos de mercado.
+     *
+     * @param apiConfig            Configuración de API keys
+     * @param apiClient            Cliente REST de Binance
+     * @param priceMap             Mapa de precios (compartido con otros módulos)
+     * @param restFallbackInterval Intervalo de polling REST para fallback (ms)
+     * @param restFallbackEnabled  Habilita/deshabilita el fallback REST
+     */
     public MarketDataEngine(ApiConfig apiConfig, BinanceApiClient apiClient,
                             ConcurrentHashMap<String, Ticker> priceMap,
                             long restFallbackInterval, boolean restFallbackEnabled) {
@@ -70,6 +107,13 @@ public class MarketDataEngine {
      *
      * @param symbols Simbolos a suscribir
      */
+    /**
+     * Inicializa el motor de datos de mercado.
+     * Crea WebSocket client, suscribe a símbolos, espera 2s para establecer conexión,
+     * e inicia fallback REST si está habilitado.
+     *
+     * @param symbols Símbolos a suscribir (ej: ["BTCUSDT", "ETHUSDT"])
+     */
     public void initialize(Collection<String> symbols) {
         if (initialized) {
             Log.warn(TAG, "Already initialized");
@@ -78,15 +122,18 @@ public class MarketDataEngine {
 
         Log.info(TAG, "Initializing MarketDataEngine with " + (symbols != null ? symbols.size() : 0) + " symbols");
 
+        // Crear handler y WebSocket client
         priceHandler = new PriceUpdateHandler(priceMap);
         wsClient = new BinanceWebSocketClient(apiConfig, priceHandler);
 
         if (symbols != null && !symbols.isEmpty()) {
+            // Registrar símbolos y conectar WebSocket
             for (String symbol : symbols) {
                 subscribedSymbols.add(symbol.toUpperCase());
             }
             wsClient.connectAndSubscribe(symbols);
 
+            // Esperar 2s para que WebSocket establezca conexión y reciba primeros datos
             try {
                 Thread.sleep(2000);
                 connected = wsClient.isConnected();
@@ -102,6 +149,7 @@ public class MarketDataEngine {
             }
         }
 
+        // Iniciar fallback REST para símbolos que no llegan por WebSocket
         if (restFallbackEnabled && apiClient != null && !subscribedSymbols.isEmpty()) {
             startRestFallback(subscribedSymbols);
         }
@@ -222,15 +270,22 @@ public class MarketDataEngine {
      *
      * @param newSymbols Simbolos a agregar
      */
+    /**
+     * Agrega símbolos a la lista de suscripción.
+     * NOTA: No reconecta el WebSocket automáticamente; los nuevos símbolos
+     * se obtendrán vía REST fallback hasta la próxima reconexión.
+     *
+     * @param newSymbols Símbolos a agregar
+     */
     public void subscribe(Collection<String> newSymbols) {
         subscribedSymbols.addAll(newSymbols.stream().map(String::toUpperCase).collect(Collectors.toList()));
         Log.info(TAG, "Subscribed to " + newSymbols.size() + " new symbols. Total: " + subscribedSymbols.size());
     }
 
     /**
-     * Cancela suscripcion a simbolos.
+     * Remueve símbolos de la suscripción.
      *
-     * @param symbols Simbolos a remover
+     * @param symbols Símbolos a remover
      */
     public void unsubscribe(Collection<String> symbols) {
         symbols.forEach(s -> subscribedSymbols.remove(s.toUpperCase()));
@@ -255,6 +310,13 @@ public class MarketDataEngine {
     /**
      * Obtiene estadisticas del motor.
      */
+    /**
+     * Obtiene el estado actual del motor de datos de mercado.
+     * Incluye: conectividad, símbolos suscritos/disponibles, mensajes,
+     * símbolos faltantes y stale (más de 10s sin actualizar).
+     *
+     * @return MarketDataStatus con todas las métricas
+     */
     public MarketDataStatus getStatus() {
         return MarketDataStatus.builder()
             .connected(isConnected())
@@ -269,6 +331,11 @@ public class MarketDataEngine {
             .build();
     }
 
+    /**
+     * Encuentra símbolos suscritos que aún no tienen datos en el priceMap.
+     *
+     * @return Conjunto de símbolos faltantes
+     */
     private Set<String> getMissingSymbols() {
         Set<String> missing = new HashSet<>();
         for (String symbol : subscribedSymbols) {
@@ -279,6 +346,12 @@ public class MarketDataEngine {
         return missing;
     }
 
+    /**
+     * Encuentra símbolos con datos desactualizados (más de maxAgeMs sin actualizar).
+     *
+     * @param maxAgeMs Edad máxima permitida sin actualización
+     * @return Conjunto de símbolos stale
+     */
     private Set<String> getStaleSymbols(long maxAgeMs) {
         Set<String> stale = new HashSet<>();
         long now = System.currentTimeMillis();
@@ -290,6 +363,10 @@ public class MarketDataEngine {
         return stale;
     }
 
+    /**
+     * Loggea el estado de suscripción: total suscritos, disponibles, cobertura,
+     * y estadísticas del fallback REST (si está habilitado).
+     */
     private void logSubscriptionStatus() {
         int total = subscribedSymbols.size();
         int available = priceMap.size();
@@ -310,6 +387,9 @@ public class MarketDataEngine {
     /**
      * Fuerza actualizacion via REST para simbolos faltantes.
      */
+    /**
+     * Fuerza una actualización inmediata vía REST para todos los símbolos faltantes.
+     */
     public void forceRestRefresh() {
         if (restFallback != null) {
             restFallback.refresh();
@@ -318,6 +398,7 @@ public class MarketDataEngine {
 
     /**
      * Cierra el motor de datos de mercado.
+     * Detiene WebSocket y fallback REST, marca flags como false.
      */
     public void shutdown() {
         Log.info(TAG, "Shutting down MarketDataEngine");
@@ -335,14 +416,32 @@ public class MarketDataEngine {
         Log.info(TAG, "MarketDataEngine shutdown complete");
     }
 
+    /**
+     * @return Total de mensajes/actualizaciones recibidas
+     */
     public int getMessageCount() {
         return messageCount.get();
     }
 
+    /**
+     * @return Copia del conjunto de símbolos suscritos
+     */
     public Set<String> getSubscribedSymbols() {
         return new HashSet<>(subscribedSymbols);
     }
 
+    /**
+     * Estado del motor de datos de mercado.
+     * connected: conexión WebSocket activa
+     * initialized: inicialización completada
+     * subscribedCount: símbolos suscritos
+     * availableCount: símbolos con datos disponibles
+     * messageCount: total de mensajes recibidos
+     * lastUpdateTime: timestamp de la última actualización
+     * restFallbackEnabled: si el fallback REST está activo
+     * missingSymbols: símbolos suscritos sin datos
+     * staleSymbols: símbolos con datos desactualizados
+     */
     @Data
     @Builder
     public static class MarketDataStatus {
@@ -358,7 +457,17 @@ public class MarketDataEngine {
     }
 
     /**
-     * Wrapper para fallback REST (usado internamente).
+     * Mecanismo de fallback REST para obtener precios de símbolos que
+     * no están llegando por WebSocket.
+     *
+     * Ejecuta polling periódico (cada intervalMs) para los símbolos objetivo
+     * que no están presentes en el priceMap. Cuando encuentra un precio,
+     * lo inserta con bid=ask=price (sin spread, ya que es un precio único).
+     *
+     * Útil para:
+     * - Símbolos con baja liquidez que no están en el stream de WebSocket
+     * - Recuperación ante caídas del WebSocket
+     * - Símbolos agregados después de la conexión inicial
      */
     private static class RestPriceFallback {
         private static final String TAG = "REST_FALLBACK";
@@ -369,6 +478,12 @@ public class MarketDataEngine {
         private final java.util.concurrent.ScheduledExecutorService scheduler;
         private volatile boolean running = false;
 
+        /**
+         * @param apiClient  Cliente REST de Binance
+         * @param priceMap   Mapa de precios compartido
+         * @param symbols    Símbolos a monitorear
+         * @param intervalMs Intervalo de polling (ms)
+         */
         public RestPriceFallback(BinanceApiClient apiClient, ConcurrentHashMap<String, Ticker> priceMap,
                                  Set<String> symbols, long intervalMs) {
             this.apiClient = apiClient;
@@ -378,21 +493,30 @@ public class MarketDataEngine {
             this.scheduler = java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
         }
 
+        /**
+         * Inicia el polling periódico de precios faltantes.
+         */
         public void start() {
             running = true;
             scheduler.scheduleAtFixedRate(this::fetchMissingPrices, 0, intervalMs,
                 java.util.concurrent.TimeUnit.MILLISECONDS);
         }
 
+        /**
+         * Obtiene precios de símbolos que faltan en el priceMap vía REST API.
+         * Solo consulta símbolos que aún no tienen datos.
+         */
         private void fetchMissingPrices() {
             if (!running) return;
 
             int fetched = 0;
             for (String symbol : targetSymbols) {
+                // Solo consultar si el símbolo no está ya en el mapa
                 if (!priceMap.containsKey(symbol)) {
                     try {
                         double price = apiClient.getSymbolPrice(symbol);
                         if (price > 0) {
+                            // Insertar con bid=ask (precio único, sin spread)
                             priceMap.put(symbol, Ticker.builder()
                                 .symbol(symbol)
                                 .bidPrice(price)
@@ -413,11 +537,17 @@ public class MarketDataEngine {
             }
         }
 
+        /**
+         * Detiene el polling.
+         */
         public void stop() {
             running = false;
             scheduler.shutdown();
         }
 
+        /**
+         * @return Cuántos símbolos objetivo tienen datos en el priceMap
+         */
         public int getFetchedCount() {
             int count = 0;
             for (String symbol : targetSymbols) {
@@ -426,6 +556,9 @@ public class MarketDataEngine {
             return count;
         }
 
+        /**
+         * @return Cuántos símbolos objetivo aún faltan en el priceMap
+         */
         public int getMissingCount() {
             int count = 0;
             for (String symbol : targetSymbols) {
@@ -434,6 +567,9 @@ public class MarketDataEngine {
             return count;
         }
 
+        /**
+         * Fuerza una actualización inmediata.
+         */
         public void refresh() {
             fetchMissingPrices();
         }

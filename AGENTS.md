@@ -6,13 +6,13 @@ Este archivo define las instrucciones para agentes de IA que trabajan en el proy
 
 ```powershell
 # Eliminar JAR antigua (OBLIGATORIO antes de recompilar)
-Remove-Item D:\ARBITRAJE_BOT\BOT_Nuevo_V4-J21\binance-arbitrage-bot\target\*.jar -ErrorAction SilentlyContinue
+Remove-Item D:\ARBITRAJE_BOT\BOT_Nuevo_V5-J21\binance-arbitrage-bot\target\*.jar -ErrorAction SilentlyContinue
 
 # Compilar
-mvn package -DskipTests -f D:\ARBITRAJE_BOT\BOT_Nuevo_V4-J21\binance-arbitrage-bot\pom.xml
+mvn package -DskipTests -f D:\ARBITRAJE_BOT\BOT_Nuevo_V5-J21\binance-arbitrage-bot\pom.xml
 
 # Ejecutar
-java -jar D:\ARBITRAJE_BOT\BOT_Nuevo_V4-J21\binance-arbitrage-bot\target\binance-arbitrage-bot-1.4.1.jar
+java -jar D:\ARBITRAJE_BOT\BOT_Nuevo_V5-J21\binance-arbitrage-bot\target\binance-arbitrage-bot-1.5.1.jar
 ```
 
 **Nota crítica**: Maven puede cachear el JAR viejo. Siempre eliminarlo antes de compilar.
@@ -32,21 +32,47 @@ java -jar D:\ARBITRAJE_BOT\BOT_Nuevo_V4-J21\binance-arbitrage-bot\target\binance
 | `display/` | [ConsoleDisplay.java](binance-arbitrage-bot/src/main/java/com/arbitrage/display/ConsoleDisplay.java) | UI de consola |
 | `util/` | [Log.java](binance-arbitrage-bot/src/main/java/com/arbitrage/util/Log.java) | Sistema de logging custom |
 
+### Módulos Principales (`module/`)
+
+| Módulo | Responsabilidad |
+|--------|-----------------|
+| **ArbitrageDetector** | Escanea triángulos cada 100ms, emite oportunidades via `ScheduledExecutorService` |
+| **ExecutionEngine** | Orquesta 3 pasos (BUY → CONVERT → SELL) con validaciones de RiskManager |
+| **FillTracker** | Seguimiento de órdenes ejecutadas y estados de fill |
+| **MarketDataEngine** | Actualización de precios desde WebSocket (ConcurrentHashMap thread-safe) |
+| **ProfitCalculator** | Cálculo de ganancias netas con comisiones |
+| **RepricingEngine** | Reajuste dinámico de precios si hay cambios de mercado |
+| **RiskManager** | Validaciones de riesgo, máximo de trades abiertos, limites de balance |
+
 ### Flujo de Ejecución
 
 ```
 WebSocket (precios) → ConcurrentHashMap<Ticker>
                          ↓
-                    ArbitrageEngine (scan 100ms)
+                    MarketDataEngine (actualiza)
+                         ↓
+                    ArbitrageDetector (scan 100ms)
                          ↓
                   ArbitrageOpportunity callback
                          ↓
-                    OrderExecutor (ejecuta)
+                    ExecutionEngine + RiskManager
                          ↓
-                  BinanceApiClient (REST API)
+                    BinanceApiClient (REST API)
                          ↓
-                  SequenceFileManager (JSON + locks)
+                  SequenceFileManager (JSON + atomic locks)
 ```
+
+## 🚀 Puntos de Entrada
+
+### Punto de Entrada Principal
+- **Main.java**: Inicia config, WebSocket, carga símbolos, arranca motors de arbitraje y ejecución
+
+### Utilidades Adicionales (ejecutables independientes)
+- **GetBalances.java**: Obtiene balances actuales de la cuenta
+- **GetOrderHistory.java**: Historial de órdenes ejecutadas
+- **GetTRXPrice.java**: Consulta precio actual de TRX
+- **SellAllSmallBalances.java**: Vende saldos pequeños (útil para limpiar polvo)
+- **SellTRX.java**: Vende posición de TRX específica
 
 ## ⚙️ Convenciones del Proyecto
 
@@ -64,10 +90,12 @@ WebSocket (precios) → ConcurrentHashMap<Ticker>
 - **Tags**: 3-4 caracteres (`API`, `Engine`, `ORDER_EXEC`, `SEQ_FILE`)
 - **Implementación**: [Log.java](binance-arbitrage-bot/src/main/java/com/arbitrage/util/Log.java) (no SLF4J/Logback)
 
-### Modelos
-- **Annotaciones**: `@Data @Builder @NoArgsConstructor @AllArgsConstructor` (Lombok)
+### Convenciones de Código
+- **Modelos**: `@Data @Builder @NoArgsConstructor @AllArgsConstructor` (Lombok)
 - **Factory methods**: `TradingSequence.create()`, `SequenceOrder.create()`
 - **Métodos computados**: `@JsonIgnore` (ej. `getOrdenes()`, `isTodasFilled()`)
+- **Concurrencia**: `ConcurrentHashMap` para `priceMap` (thread-safe entre WebSocket y árbitro)
+- **Threading**: `ScheduledExecutorService` con `cores` threads (de `.config`) en lugar de threads ad-hoc
 
 ### Persistencia
 - **Formato**: JSON map indexado por `seqId`
@@ -93,10 +121,10 @@ WebSocket (precios) → ConcurrentHashMap<Ticker>
 
 ## 📦 Dependencias
 
-- **Java**: 11 (requerido)
+- **Java**: 21 (requerido, LTS)
 - **Maven Plugins**: `maven-shade-plugin` (Fat JAR), `maven-jar-plugin`
 - **Librerías**: OkHttp 4.12.0, Jackson 2.17.1, Lombok 1.18.34
-- **NO usado**: SLF4J, Logback (logging custom con [Log.java](binance-arbitrage-bot/src/main/java/com/arbitrage/util/Log.java))
+- **Log.java custom**: Logging con tags (3-4 caracteres). Nota: SLF4J/Logback en pom.xml son residuales, se usa [Log.java](binance-arbitrage-bot/src/main/java/com/arbitrage/util/Log.java)
 
 ## 🚨 Restricciones de Desarrollo
 
@@ -151,7 +179,7 @@ Antes de responder cualquier pregunta técnica:
 
 Nunca responder usando únicamente conocimiento entrenado si Context7 puede proporcionar documentación actualizada.
 
-# Memory Rules
+## Memory Rules
 
 Siempre busca en memoria antes de:
 - coding
@@ -169,23 +197,23 @@ Siempre salva:
 - TODOs
 - infrastructure notes
 
-# Project Memories
+# Memorias del Proyecto
 
-# Agent Harness
+# Arnés de Agentes
 
-- Use this as the baseline memory layer for the project.
-- Before coding, recall current context from the local memories store via MCP (`get_context`) or CLI (`memories recall`).
-- Memories are local-first: project + global records come from your local DB; cloud sync mirrors that state.
-- When rules conflict, prefer path-scoped rules, then project rules, then global rules.
+- Usa esto como la capa base de memoria del proyecto.
+- Antes de codificar, recupera el contexto actual del almacén de memorias local via MCP (`get_context`) o CLI (`memories recall`).
+- Las memorias son locales-primero: los registros de proyecto + global provienen de tu base de datos local; sincronización en la nube refleja ese estado.
+- Cuando hay conflictos de reglas, prefiere reglas de ámbito de ruta, luego reglas de proyecto, luego reglas globales.
 
-## Runtime Checklist
+## Lista de Verificación en Runtime
 
-- Start tasks with a context recall (`memories recall --json`).
-- Persist important decisions with `memories add` or MCP `add_memory`.
-- Edit source memories instead of hand-editing generated integration files.
+- Inicia tareas con recuperación de contexto (`memories recall --json`).
+- Persiste decisiones importantes con `memories add` o MCP `add_memory`.
+- Edita memorias de origen en lugar de editar manualmente archivos de integración generados.
 
-## Stored Memories
+## Memorias Almacenadas
 
-- No stored memories yet. Add one with `memories add --rule "..."`.
-<!-- Generated by memories.sh at 2026-05-07T23:50:56.019Z -->
-<!-- Generated by memories.sh at 2026-05-07T23:50:56.024Z -->
+- Sin memorias almacenadas aún. Agrega una con `memories add --rule "..."`.
+<!-- Generado por memories.sh en 2026-05-07T23:50:56.019Z -->
+<!-- Generado por memories.sh en 2026-05-07T23:50:56.024Z -->

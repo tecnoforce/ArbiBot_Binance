@@ -10,9 +10,27 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Cliente WebSocket para conectar a Binance y recibir precios.
- * Usa la libreria OkHttp para conexion WebSocket.
- * Recibe actualizaciones de precios @ bookTicker (mejor precio bid/ask).
+ * Cliente WebSocket para conectar a Binance y recibir precios en tiempo real.
+ * <p>
+ * Usa la librería OkHttp para la conexión WebSocket, con manejo automático de
+ * ping/pong y reconexión básica.
+ * <p>
+ * Funcionamiento:
+ * <ol>
+ *   <li>Construye una URL combinada con streams {@code symbol@bookTicker}</li>
+ *   <li>Crea un {@link okhttp3.Request} con la URL de Binance</li>
+ *   <li>Inicia la conexión con un {@link okhttp3.WebSocketListener} anónimo</li>
+ *   <li>El listener maneja: onOpen, onMessage, onClosing, onClosed, onFailure</li>
+ *   <li>Cada mensaje JSON se delega a {@link PriceUpdateHandler#handlePriceUpdate(String)}</li>
+ *   <li>Ante un cierre o fallo, programa reconexión con backoff exponencial</li>
+ * </ol>
+ * <p>
+ * Configuración de OkHttp:
+ * <ul>
+ *   <li><b>readTimeout(0)</b> — Sin timeout de lectura (el WebSocket es long-lived)</li>
+ *   <li><b>pingInterval(30s)</b> — Envía PING cada 30s para mantener la conexión viva</li>
+ * </ul>
+ * @see PriceUpdateHandler        # Procesador de mensajes de precio
  */
 public class BinanceWebSocketClient {
     private static final String TAG = "WebSocket";
@@ -29,6 +47,7 @@ public class BinanceWebSocketClient {
     private final ExecutorService executor;            // Para reconexiones
     private final CopyOnWriteArrayList<String> subscriptions;  // Streams suscritos
     private volatile boolean connected = false;         // Estado de conexion
+    private volatile boolean closing = false;            // Flag para evitar reconexion en cierre intencional
     private volatile okhttp3.WebSocket wsSocket;   // Socket OkHttp
     private okhttp3.OkHttpClient wsClient;       // Cliente OkHttp
     
@@ -168,6 +187,9 @@ public class BinanceWebSocketClient {
      * Maneja desconexion y programa reconexion.
      */
     private void handleDisconnect() {
+        if (closing) {
+            return;
+        }
         connected = false;
         if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
             Log.error(TAG, "Max intentos de reconexion alcanzados");
@@ -181,20 +203,27 @@ public class BinanceWebSocketClient {
      * @param symbols Simbolos para re-suscribir
      */
     private void scheduleReconnect(Iterable<String> symbols) {
+        if (closing || executor.isShutdown()) {
+            return;
+        }
         // Delay: min(500ms * 2^intentos, 4000ms)
         long delay = Math.min(500L * (1L << reconnectAttempts), 4000L);
         reconnectAttempts++;
 
         Log.warn(TAG, "Reintentando conexion (intento " + reconnectAttempts + ") en " + delay + "ms...");
 
-        executor.submit(() -> {
-            try {
-                Thread.sleep(delay);
-                connectAndSubscribe(symbols);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-        });
+        try {
+            executor.submit(() -> {
+                try {
+                    Thread.sleep(delay);
+                    connectAndSubscribe(symbols);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            });
+        } catch (java.util.concurrent.RejectedExecutionException e) {
+            Log.warn(TAG, "Reconexion cancelada: ejecutor cerrado");
+        }
     }
 
     /**
@@ -224,6 +253,7 @@ public class BinanceWebSocketClient {
      * Cierra conexion WebSocket.
      */
     public void close() {
+        closing = true;
         connected = false;
         if (wsSocket != null) {
             wsSocket.close(1000, "Cerrando");

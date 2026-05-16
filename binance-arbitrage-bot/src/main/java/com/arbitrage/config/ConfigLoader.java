@@ -4,51 +4,64 @@ import java.io.BufferedReader;
 import java.io.FileReader;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
- * Clase utilitaria para cargar archivos de configuracion.
- * Lee archivos de texto plano y los convierte en objetos de configuracion:
- * - AppConfig: parametros generales del trading
- * - ApiConfig: credenciales y URLs de Binance
- * - Coins: lista de pares a monitorear
+ * Cargador de archivos de configuracion del bot de arbitraje.
+ * <p>
+ Lee archivos de texto plano con formato {@code clave valor} (separados por espacios)
+ y los transforma en objetos tipados: {@link AppConfig}, {@link ApiConfig} y listas de monedas.
+ * <p>
+ * Los archivos soportan:
+ * <ul>
+ *   <li>Comentarios: lineas que empiezan con {@code #}</li>
+ *   <li>Lineas vacias: ignoradas automaticamente</li>
+ *   <li>Claves case-insensitive en AppConfig (convertidas a minusculas)</li>
+ * </ul>
+ * Las claves desconocidas se ignoran sin error para permitir campos nuevos sin romper versiones viejas.
  */
 public class ConfigLoader {
 
     /**
-     * Carga configuracion de la aplicacion desde archivo.
-     * Formato esperado (cada linea): clave valor
-     *   basecurrency USDT
-     *   minprofit 0.1
-     *   feeop1 0.1
-     *   balancepertrade 100
-     *   realorder false
-     *   loglevel INFO
-     * @param configFilePath Ruta del archivo de configuracion
-     * @return Objeto AppConfig con los parametros cargados
-     * @throws IOException Si no puede leer el archivo
+     * Carga la configuracion general del bot desde un archivo de texto.
+     * <p>
+     * Formato esperado (una clave por linea, separada por espacios):
+     * <pre>
+     * basecurrency USDT
+     * minprofit 0.1
+     * feeop1 0.1
+     * balancepertrade 100
+     * realorder false
+     * loglevel INFO
+     * </pre>
+     * Las claves son <b>case-insensitive</b>: el parser las convierte a minusculas
+     * antes de hacer el match. Claves no reconocidas se ignoran silenciosamente.
+     *
+     * @param configFilePath Ruta absoluta o relativa del archivo .config
+     * @return AppConfig con todos los parametros parseados (usa valores {@code null} o 0 si no se especificaron)
+     * @throws IOException si el archivo no existe, es un directorio o no puede leerse
      */
     public static AppConfig loadAppConfig(String configFilePath) throws IOException {
-        // Builder Lombok para construir objeto AppConfig
+        // Lombok builder: construye el objeto de forma inmutable y fluida
         AppConfig.AppConfigBuilder builder = AppConfig.builder();
 
         try (BufferedReader reader = new BufferedReader(new FileReader(configFilePath))) {
             String line;
             while ((line = reader.readLine()) != null) {
-                // Elimina espacios al inicio/final
+                // Limpieza: elimina whitespace y salta lineas irrelevantes
                 line = line.trim();
-                // Ignora lineas vacias o comentarios
                 if (line.isEmpty() || line.startsWith("#")) continue;
 
-                // Divide en clave y valor (separados por espacios)
+                // Split por whitespace: espera exactamente "clave valor"
                 String[] parts = line.split("\\s+");
                 if (parts.length < 2) continue;
 
-                // Extrae clave y valor
                 String key = parts[0];
                 String value = parts[1];
 
-                // Mapea cada clave al campo correspondiente
+                // NOTA: se usa toLowerCase() para que las claves sean case-insensitive
                 switch (key.toLowerCase()) {
                     case "basecurrency":
                         builder.baseCurrency(value);
@@ -56,12 +69,18 @@ public class ConfigLoader {
                     case "minprofit":
                         builder.minProfit(Double.parseDouble(value));
                         break;
+                    // ---------------------------------------------------------------
+                    // UMBRALES DE RENTABILIDAD: profit minimo y maximo esperado
+                    // ---------------------------------------------------------------
                     case "maxprofit":
                         builder.maxProfit(Double.parseDouble(value));
                         break;
                     case "feeop1":
                         builder.feeOp1(Double.parseDouble(value));
                         break;
+                    // ---------------------------------------------------------------
+                    // COMISIONES: fee de cada pata del triangulo (Op1, Op2, Op3)
+                    // ---------------------------------------------------------------
                     case "feeop2":
                         builder.feeOp2(Double.parseDouble(value));
                         break;
@@ -71,6 +90,9 @@ public class ConfigLoader {
                     case "safetyvolume":
                         builder.safetyVolume(Double.parseDouble(value));
                         break;
+                    // ---------------------------------------------------------------
+                    // PARAMETROS DE TRADING: volumen, paralelismo, balance por trade
+                    // ---------------------------------------------------------------
                     case "cores":
                         builder.cores(Integer.parseInt(value));
                         break;
@@ -83,6 +105,9 @@ public class ConfigLoader {
                     case "strategy":
                         builder.strategy(value);
                         break;
+                    // ---------------------------------------------------------------
+                    // LOGS Y CONTROL DE OPERACIONES: nivel de log, max abiertas, blacklist
+                    // ---------------------------------------------------------------
                     case "logs":
                         builder.logs(value);
                         break;
@@ -98,6 +123,9 @@ public class ConfigLoader {
                     case "modehf":
                         builder.modeHF(Boolean.parseBoolean(value));
                         break;
+                    // ---------------------------------------------------------------
+                    // TIPOS DE ORDEN: MARKET o LIMIT para cada operacion del triangulo
+                    // ---------------------------------------------------------------
                     case "typeop1":
                         builder.typeOp1(value);
                         break;
@@ -113,6 +141,9 @@ public class ConfigLoader {
                     case "loglevel":
                         builder.logLevel(value);
                         break;
+                    // ---------------------------------------------------------------
+                    // INTERVALOS DE TIEMPO: polling, timeout de orden, sync de wallet
+                    // ---------------------------------------------------------------
                     case "pollinginterval":
                         builder.pollingIntervalMs(Long.parseLong(value));
                         break;
@@ -122,6 +153,18 @@ public class ConfigLoader {
                     case "walletsyncinterval":
                         builder.walletSyncIntervalMs(Long.parseLong(value));
                         break;
+                    case "testserver":
+                        builder.testserver(Boolean.parseBoolean(value));
+                        break;
+                    // ---------------------------------------------------------------
+                    // VERIFICACION DE BNB PARA DESCUENTO DE COMISIONES
+                    // ---------------------------------------------------------------
+                    case "checkbnbbalance":
+                        builder.checkBNBBalance(Boolean.parseBoolean(value));
+                        break;
+                    case "minbnbbalance":
+                        builder.minBNBBalance(Double.parseDouble(value));
+                        break;
                 }
             }
         }
@@ -130,33 +173,42 @@ public class ConfigLoader {
     }
 
     /**
-     * Carga credenciales API desde archivo.
-     * Formato esperado:
-     *   testnet true
-     *   apikey TU_API_KEY
-     *   secret TU_SECRET_KEY
-     *   baseUrl https://api.binance.com
-     *   wsUrl wss://stream.binance.com
-     *   testnet_apikey KEY_TESTNET
-     *   testnet_secret SECRET_TESTNET
-     * @param apiConfigFilePath Ruta del archivo de credenciales
-     * @return Objeto ApiConfig con credenciales cargadas
-     * @throws IOException Si no puede leer el archivo
+     * Carga las credenciales de la API de Binance desde un archivo de configuracion.
+     * <p>
+     * El archivo puede contener credenciales tanto para <b>Mainnet</b> como para <b>Testnet</b>.
+     * Se usa la bandera {@code testnet true/false} para seleccionar cual conjunto activar.
+     * <p>
+     * Formato esperado (una clave por linea):
+     * <pre>
+     * testnet true
+     * apikey TU_API_KEY_MAINNET
+     * secret TU_SECRET_MAINNET
+     * baseUrl https://api.binance.com
+     * wsUrl wss://stream.binance.com:9443
+     * testnet_apikey TU_API_KEY_TESTNET
+     * testnet_secret TU_SECRET_TESTNET
+     * testnet_coins 50
+     * </pre>
+     * Las URLs tienen valores por defecto desde {@link NetworkEndpoints} si no se especifican.
+     *
+     * @param apiConfigFilePath Ruta del archivo de credenciales (usualmente {@code user.apiConfig})
+     * @return ApiConfig con credenciales para ambos entornos y la bandera de seleccion
+     * @throws IOException si el archivo no existe o no puede leerse
      */
     public static ApiConfig loadApiConfig(String apiConfigFilePath) throws IOException {
-        // Valores por defecto para Mainnet
+        // Valores por defecto para MAINNET: claves vacias + endpoints de produccion
         String apiKey = "";
         String secretKey = "";
         String baseUrl = NetworkEndpoints.MAINNET_REST_URL;
         String wsUrl = NetworkEndpoints.MAINNET_WS_URL;
-        boolean testnet = false;
+        boolean testnet = false;  // Por defecto asume mainnet
         
-        // Valores por defecto para Testnet
+        // Valores por defecto para TESTNET: claves vacias + endpoints de pruebas
         String testnetApiKey = "";
         String testnetSecretKey = "";
         String testnetBaseUrl = NetworkEndpoints.TESTNET_REST_URL;
         String testnetWsUrl = NetworkEndpoints.TESTNET_WS_URL;
-        int testnetCoins = 0;  // Por defecto carga todas
+        int testnetCoins = 0;  // 0 = cargar todas las monedas disponibles
 
         try (BufferedReader reader = new BufferedReader(new FileReader(apiConfigFilePath))) {
             String line;
@@ -170,7 +222,12 @@ public class ConfigLoader {
                 String key = parts[0];
                 String value = parts[1];
 
+                // NOTA: Este switch NO usa toLowerCase() — las claves de API son exactas
+                // Cada case acepta dos formatos: "apikey" y "apiKey" por compatibilidad
                 switch (key) {
+                    // ---------------------------------------------------------------
+                    // CREDENCIALES MAINNET
+                    // ---------------------------------------------------------------
                     case "apikey":
                     case "apiKey":
                         apiKey = value;
@@ -185,9 +242,17 @@ public class ConfigLoader {
                     case "wsUrl":
                         wsUrl = value;
                         break;
+
+                    // ---------------------------------------------------------------
+                    // BANDERA DE ENTORNO: true = testnet, false/ausente = mainnet
+                    // ---------------------------------------------------------------
                     case "testnet":
                         testnet = Boolean.parseBoolean(value);
                         break;
+
+                    // ---------------------------------------------------------------
+                    // CREDENCIALES TESTNET
+                    // ---------------------------------------------------------------
                     case "testnet_apikey":
                     case "testnetApiKey":
                         testnetApiKey = value;
@@ -210,7 +275,8 @@ public class ConfigLoader {
             }
         }
 
-        // Retorna objeto ApiConfig con todas las credenciales
+        // Construye ApiConfig con ambos conjuntos de credenciales (mainnet + testnet)
+        // El entorno activo lo determina la bandera testnet en tiempo de ejecucion
         return ApiConfig.builder()
                 .apiKey(apiKey)
                 .secretKey(secretKey)
@@ -226,18 +292,23 @@ public class ConfigLoader {
     }
 
     /**
-     * Carga lista de simbolos/monedas a monitorear.
-     * Formato: una moneda por linea (ej: ETH, BTC, SOL)
-     * Se generan automaticamente los pares:
-     *   - MONEDA + baseCurrency (ej: ETHUSDT)
-     *   - MONEDA + BTC (ej: ETHBTC)
-     * @param coinsFilePath Ruta del archivo de monedas
-     * @return Lista de simbolos (ej: ["ETHUSDT", "ETHBTC", "BTCUSDT"])
-     * @throws IOException Si no puede leer el archivo
+     * Carga la lista de monedas a monitorear desde un archivo de texto y genera
+     * los pares de trading necesarios para la deteccion de triangulos.
+     * <p>
+     * Por cada moneda en el archivo (ejemplo {@code ETH}) se generan DOS pares:
+     * <ul>
+     *   <li>{@code ETH + baseCurrency} (ej. ETHUSDT) — para el lado del triangulo contra USDT</li>
+     *   <li>{@code ETH + BTC} (ej. ETHBTC) — para el lado del triangulo contra BTC</li>
+     * </ul>
+     * BTCUSDT siempre se incluye aunque no este en el archivo.
+     *
+     * @param coinsFilePath Ruta del archivo .coins (una moneda por linea)
+     * @return Lista de simbolos tipo {@code ["ETHUSDT", "ETHBTC", "SOLUSDT", "SOLBTC", "BTCUSDT"]}
+     * @throws IOException si el archivo no existe o no puede leerse
      */
     public static List<String> loadCoins(String coinsFilePath) throws IOException {
-        List<String> coins = new ArrayList<>();
-        String baseCurrency = "USDT";  // Moneda base por defecto
+        Set<String> uniqueCoins = new LinkedHashSet<>();
+        String baseCurrency = "USDT";
 
         try (BufferedReader reader = new BufferedReader(new FileReader(coinsFilePath))) {
             String line;
@@ -249,22 +320,19 @@ public class ConfigLoader {
                 for (String part : parts) {
                     part = part.trim().toUpperCase();
                     if (part.isEmpty()) continue;
-                    
-                    // Evita duplicados y la propia base (ej: USDT)
+
                     if (!part.equals("BTC") && !part.equals(baseCurrency)) {
-                        // Agrega par con USDT y con BTC
-                        coins.add(part + baseCurrency);
-                        coins.add(part + "BTC");
+                        uniqueCoins.add(part + baseCurrency);
+                        uniqueCoins.add(part + "BTC");
                     }
                 }
             }
-            
-            // Siempre agrega BTCUSDT si no existe
-            if (!coins.contains("BTC" + baseCurrency)) {
-                coins.add("BTC" + baseCurrency);
+
+            if (!uniqueCoins.contains("BTC" + baseCurrency)) {
+                uniqueCoins.add("BTC" + baseCurrency);
             }
         }
 
-        return coins;
+        return new ArrayList<>(uniqueCoins);
     }
 }

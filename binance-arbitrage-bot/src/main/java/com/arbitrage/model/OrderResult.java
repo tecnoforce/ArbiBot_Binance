@@ -4,54 +4,59 @@ import lombok.Builder;
 import lombok.Data;
 
 /**
- * Resultado de una orden ejecutada.
- * Contiene toda la informacion de una orden.
+ * Resultado de una orden ejecutada devuelto por la API REST de Binance.
+ * <p>
+ * Contiene toda la información devuelta por Binance tras crear o consultar
+ * una orden: símbolo, lado, IDs, cantidades, estado, comisiones y tiempos.
+ * Se usa como DTO (Data Transfer Object) entre {@code BinanceApiClient}
+ * y el motor de arbitraje.
+ * </p>
  */
 @Data
 @Builder
 public class OrderResult {
-    // Simbolo (ej: "BTCUSDT")
+    /** Símbolo del par (ej: "BTCUSDT") */
     private String symbol;
 
-    // Lado (BUY o SELL)
+    /** Lado de la orden: "BUY" o "SELL" */
     private String side;
 
-    // ID de orden en Binance
+    /** ID de orden asignado por Binance */
     private String orderId;
 
-    // Precio de la orden
+    /** Precio de la orden (0 para MARKET) */
     private double price;
 
-    // Cantidad ordenada
+    /** Cantidad solicitada en la orden */
     private double quantity;
 
-    // Cantidad ejecutada
+    /** Cantidad realmente ejecutada (puede ser parcial) */
     private double executedQty;
 
-    // Estado (NEW, PARTIALLY_FILLED, FILLED, CANCELED, etc.)
+    /** Estado devuelto por Binance: "NEW", "PARTIALLY_FILLED", "FILLED", "CANCELED", etc. */
     private String status;
 
-    // Tiempo de ejecucion en ms
+    /** Tiempo que tomó ejecutar la orden en milisegundos */
     private long elapsedTime;
 
-    // Tipo de orden (MARKET, LIMIT, STOP_LOSS)
+    /** Tipo de orden: "MARKET", "LIMIT", "STOP_LOSS", etc. */
     private String orderType;
 
-    // Si fue exitosa
+    /** Indica si la orden se ejecutó sin errores */
     private boolean success;
 
-    // Mensaje de error si fallo
+    /** Mensaje de error si la orden falló (campo human-readable) */
     private String errorMessage;
 
-    // Timestamp de creacion de la orden (transactTime)
+    /** Timestamp de creación de la orden devuelto por Binance (transactTime) */
     private long transactTime;
 
-    // Timestamp de ultima actualizacion (updateTime)
+    /** Timestamp de la última actualización de la orden (updateTime) */
     private long updateTime;
 
-    // Asset de comision (ej: "BNB")
+    /** Asset usado para pagar la comisión (ej: "BNB", "USDT", "BTC") */
     private String commissionAsset;
 
-    // Monto de comision
+    /** Monto de la comisión cobrada */
     private double commissionAmount;
 }

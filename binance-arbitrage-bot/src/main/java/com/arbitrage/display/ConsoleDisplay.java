@@ -15,14 +15,48 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
- * Display de consola para el bot de arbitraje.
- * Muestra dashboard y resultados de operaciones.
- * Implementa OpportunityDisplay para recibir Ordenes.
+ * ConsoleDisplay - Interfaz de usuario de consola para el bot de arbitraje triangular.
+ *
+ * Responsabilidades principales:
+ * - Mostrar el dashboard principal con estado de conexion, balances y configuracion
+ * - Mostrar resultados de operaciones en formato tabular con colores ANSI
+ * - Mostrar secuencias de trading independientes con impresion atomica (sin mezcla entre hilos)
+ * - Filtrar salida segun el nivel de log (SCAN=modo silencioso, INFO=modo detallado)
+ *
+ * Formato de la UI:
+ *   ENCABEZADO:
+ *     "Binance Triangular Arbitrage Bot v1.4.1"
+ *     Log Level, Connection Status (TESTNET/MAINNET), Balance USDT/BNB, BalancePerOp, MinProfit
+ *   ORDEN:
+ *     [OpN] SYMBOL  SIDE  Qty:XXXXXXXXXX Price:XXXXXXXXXXXXXX Status:XXXXXX ElapsedTime:XXXms OrderId XXXXXXXXXX TYPE
+ *   PROFIT:
+ *     profit= X.XXXX%   (verde=positivo, amarillo=negativo, blanco=cero)
+ *
+ * Colores ANSI por estado:
+ *   Verde  (ANSI_GREEN)  -> Conexion activa, orden FILLED, profit positivo
+ *   Amarillo(ANSI_YELLOW)-> Profit negativo, modo MAINNET, estados no-FILLED
+ *   Cyan   (ANSI_CYAN)   -> Bordes decorativos, encabezado, modo TESTNET
+ *   Blanco (ANSI_WHITE)  -> Texto neutral, etiquetas descriptivas
+ *
+ * Thread-safety:
+ *   Usa ConcurrentHashMap&lt;Integer, ReentrantLock&gt; para imprimir secuencias
+ *   de forma atomica sin mezclar lineas de diferentes hilos de ejecucion.
+ *
+ * Implementa OrderExecutor.OpportunityDisplay para recibir callbacks
+ * asincronos desde el ejecutor de ordenes.
  */
 public class ConsoleDisplay implements OrderExecutor.OpportunityDisplay {
 
     // =====================================================================
-    // CODIGOS ANSI PARA COLORES
+    // CODIGOS ANSI PARA COLORES DE CONSOLA
+    // Secuencias de escape ANSI para colorear la salida en terminal.
+    // Soportado en: PowerShell 7, Cmder, VS Code terminal, Windows Terminal.
+    //
+    //   ANSI_YELLOW - Profit negativo, modo MAINNET, estados PENDING/CANCELED
+    //   ANSI_GREEN  - Conexion activa, orden FILLED, profit positivo
+    //   ANSI_WHITE  - Texto neutral, etiquetas de campo
+    //   ANSI_CYAN   - Bordes decorativos (=====), encabezado, modo TESTNET
+    //   ANSI_RESET  - Restablece al color por defecto de la terminal
     // =====================================================================
     private static final String ANSI_YELLOW = "\u001B[33m";
     private static final String ANSI_GREEN = "\u001B[32m";
@@ -30,11 +64,24 @@ public class ConsoleDisplay implements OrderExecutor.OpportunityDisplay {
     private static final String ANSI_CYAN = "\u001B[36m";
     private static final String ANSI_RESET = "\u001B[0m";
 
-    // Formato de hora
+    // Formato de hora para timestamps en dashboard (ej. "14:30:15")
     private static final DateTimeFormatter TIME_FORMAT = DateTimeFormatter.ofPattern("HH:mm:ss");
 
     // =====================================================================
-    // ESTADO
+    // ESTADO INTERNO DEL DISPLAY
+    // Variables que reflejan el estado actual del bot para mostrar en UI.
+    // Se actualizan desde otros componentes via setters o callbacks.
+    //
+    //   connectionActive   - true si WebSocket conectado, false si inactivo
+    //   isTestnet          - true=TESTNET, false=MAINNET (cambia endpoint API)
+    //   balanceUSDT        - Balance disponible en USDT
+    //   balanceBNB         - Balance disponible en BNB
+    //   bnbPrice           - Precio de BNB en USDT (para calcular valor total)
+    //   balancePerOp       - Cantidad de USDT asignada por operacion (AppConfig)
+    //   minProfit          - Profit minimo % para considerar oportunidad valida
+    //   opportunityCount   - Contador de oportunidades detectadas
+    //   logLevel           - Nivel de logging activo (DEBUG|SCAN|INFO|WARN|ERROR)
+    //   sequenceLocks      - Locks por sequenceId para impresion atomica thread-safe
     // =====================================================================
     private boolean connectionActive = false;
     private boolean isTestnet = false;
@@ -49,14 +96,19 @@ public class ConsoleDisplay implements OrderExecutor.OpportunityDisplay {
     private WalletSyncManager walletSyncManager;
 
     /**
-     * Muestra el dashboard inicial.
-     * @param config Configuracion
-     * @param connectionActive Si esta conectado
-     * @param isTestnet Si es testnet
-     * @param balanceUSDT Balance USDT
-     * @param balanceBNB Balance BNB
-     * @param bnbPrice Precio BNB
-     * @param logLevel Nivel de log
+     * Muestra el dashboard inicial del bot en la consola.
+     * Imprime el encabezado decorativo con bordes cyan, version del bot,
+     * nivel de log, estado de conexion, entorno (TESTNET/MAINNET),
+     * balances actuales (USDT y BNB con valor en USDT), cantidad asignada
+     * por operacion y profit minimo configurado desde AppConfig.
+     *
+     * @param config Objeto AppConfig con parametros de configuracion del bot
+     * @param connectionActive true si el WebSocket esta conectado
+     * @param isTestnet true si opera en testnet de Binance
+     * @param balanceUSDT Balance actual disponible en USDT
+     * @param balanceBNB Balance actual disponible en BNB
+     * @param bnbPrice Precio actual de BNB cotizado en USDT
+     * @param logLevel Nivel de logging activo (DEBUG|SCAN|INFO|WARN|ERROR)
      */
     public void showDashboard(AppConfig config, boolean connectionActive, boolean isTestnet, 
                         double balanceUSDT, double balanceBNB, double bnbPrice, String logLevel) {
@@ -86,7 +138,7 @@ public class ConsoleDisplay implements OrderExecutor.OpportunityDisplay {
 
         System.out.println();
         System.out.println(ANSI_CYAN + "================================================================================" + ANSI_RESET);
-        System.out.println(ANSI_CYAN + "  Binance Triangular Arbitrage Bot v1.4.1" + ANSI_RESET);
+        System.out.println(ANSI_CYAN + "  Binance Triangular Arbitrage Bot v1.5.1" + ANSI_RESET);
         System.out.println(ANSI_CYAN + "================================================================================" + ANSI_RESET);
         
         System.out.println(ANSI_WHITE + "  Log Level   : " + ANSI_YELLOW + logLevel + ANSI_RESET);
@@ -247,7 +299,7 @@ public class ConsoleDisplay implements OrderExecutor.OpportunityDisplay {
         String mode = live ? "LIVE" : "SIMULATED";
         
         System.out.println();
-        System.out.println("SeqId (#" + sequenceId + ") --> " + time + " (" + mode + ")");
+        System.out.println("Seq #" + sequenceId + " --> " + time + " (" + mode + ")");
     }
 
     /**
@@ -313,9 +365,18 @@ public class ConsoleDisplay implements OrderExecutor.OpportunityDisplay {
     }
 
     // =====================================================================
-    // WALLET SYNC
+    // WALLET SYNC - Sincronizacion de balances en tiempo real
+    // Se registra como listener de WalletSyncManager para recibir
+    // actualizaciones push sin necesidad de polling periodico.
     // =====================================================================
 
+    /**
+     * Configura el WalletSyncManager y se suscribe a sus actualizaciones.
+     * Al asignarlo, sincroniza inmediatamente los balances iniciales.
+     * Si wsm es null, simplemente no hay sincronizacion de wallet.
+     *
+     * @param wsm Instancia de WalletSyncManager, o null si no se usa
+     */
     public void setWalletSyncManager(WalletSyncManager wsm) {
         this.walletSyncManager = wsm;
         if (wsm != null) {
@@ -324,6 +385,15 @@ public class ConsoleDisplay implements OrderExecutor.OpportunityDisplay {
         }
     }
 
+    /**
+     * Callback invocado por WalletSyncManager cuando los balances cambian.
+     * Actualiza las variables internas para que el dashboard refleje
+     * el estado actual de la wallet en tiempo real, sin polling.
+     *
+     * @param usdt Nuevo balance de USDT
+     * @param bnb Nuevo balance de BNB
+     * @param bnbPrice Nuevo precio de BNB en USDT
+     */
     private void onBalancesUpdated(double usdt, double bnb, double bnbPrice) {
         this.balanceUSDT = usdt;
         this.balanceBNB = bnb;
@@ -331,16 +401,35 @@ public class ConsoleDisplay implements OrderExecutor.OpportunityDisplay {
     }
 
     // =====================================================================
-    // SETTERS
+    // SETTERS - Metodos para actualizar el estado interno del display
+    // desde otros componentes del bot (hilos de WebSocket, engine, etc.)
     // =====================================================================
+
+    /**
+     * Actualiza el estado de conexion del WebSocket en el dashboard.
+     *
+     * @param active true si el WebSocket esta conectado y recibiendo datos
+     */
     public void setConnectionStatus(boolean active) {
         this.connectionActive = active;
     }
 
+    /**
+     * Configura el modo de operacion mostrado en el dashboard.
+     *
+     * @param testnet true para mostrar TESTNET, false para MAINNET
+     */
     public void setTestnet(boolean testnet) {
         this.isTestnet = testnet;
     }
 
+    /**
+     * Actualiza los balances mostrados en el dashboard.
+     *
+     * @param usdt Balance actual de USDT
+     * @param bnb Balance actual de BNB
+     * @param bnbPrice Precio actual de BNB en USDT
+     */
     public void setBalances(double usdt, double bnb, double bnbPrice) {
         this.balanceUSDT = usdt;
         this.balanceBNB = bnb;

@@ -19,50 +19,66 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Cliente REST API de Binance.
- * Maneja todas las llamadas a la API REST:
- *   - Consultas de cuenta (balances)
- *   - Precios de simbolos
- *   - Colocar ordenes
- *   - Sincronizacion de tiempo
+ * CLIENTE REST API DE BINANCE.
+ * 
+ * Capa de comunicación directa con los endpoints REST de Binance.
+ * Maneja:
+ *   - Requests públicos (precios, exchangeInfo)
+ *   - Requests firmados con HMAC-SHA256 (balances, órdenes)
+ *   - Sincronización de tiempo (serverTime offset)
+ *   - Caché de filtros LOT_SIZE, MIN_NOTIONAL, PRICE_FILTER
+ *   - Colocación, consulta y cancelación de órdenes
+ *   - Extracción de base/quote assets de símbolos
+ *
+ * ARQUITECTURA DE SEGURIDAD:
+ *   - Todas las requests firmadas incluyen recvWindow=60000ms
+ *   - La firma HMAC-SHA256 se genera con la Secret Key
+ *   - El timestamp se corrige con el offset del servidor
+ *   - Si el offset supera 60s, se usa timestamp local
+ *
+ * @see com.arbitrage.config.ApiConfig
  */
 public class BinanceApiClient {
     private static final String TAG = "API";
     
-    // recvWindow para requests signed (60 segundos)
+    /** Ventana de recepción para requests firmados (60 segundos) */
     private static final long RECV_WINDOW = 60000L;
 
     // =====================================================================
-    // CONFIGURACION
+    // CONFIGURACIÓN
     // =====================================================================
     private final ApiConfig apiConfig;
     private final okhttp3.OkHttpClient httpClient;
     private final com.fasterxml.jackson.databind.ObjectMapper objectMapper;
 
-    // Cache de filtros LOT_SIZE
+    /** Caché de filtros LOT_SIZE por símbolo: {minQty, maxQty, stepSize} */
     private final Map<String, Map<String, Double>> lotSizeFilters = new ConcurrentHashMap<>();
+    /** Caché de MIN_NOTIONAL (valor mínimo de la orden) por símbolo */
     private final Map<String, Double> minNotionalFilters = new ConcurrentHashMap<>();
+    /** Caché de tickSize (PRICE_FILTER) por símbolo */
     private final Map<String, Double> priceTickSizes = new ConcurrentHashMap<>();
+    /** Timestamp de última carga de filtros (para TTL) */
     private volatile long lastFiltersLoad = 0;
+    /** TTL del caché de filtros: 5 minutos */
     private static final long FILTERS_TTL_MS = 300000;
     
     // =====================================================================
-    // SINCRONIZACION DE TIEMPO
+    // SINCRONIZACIÓN DE TIEMPO
     // =====================================================================
-    // Offset entre tiempo local y servidor Binance
+    /** Diferencia entre tiempo del servidor Binance y tiempo local */
     private long serverTimeOffset = 0;
     
-    // Scheduler para sincronizacion periodica
+    /** Scheduler para sincronización periódica de tiempo */
     private final ScheduledExecutorService scheduler;
 
     /**
-     * Constructor.
-     * @param apiConfig Credenciales API
+     * Constructor. Inicializa cliente HTTP, sincroniza tiempo y precarga filtros.
+     * @param apiConfig Credenciales API (API Key, Secret Key, endpoints)
      */
     public BinanceApiClient(ApiConfig apiConfig) {
         this.apiConfig = apiConfig;
         
-        // Cliente HTTP con timeouts
+        // Cliente HTTP con timeouts de 10s (conexión y lectura)
         this.httpClient = new okhttp3.OkHttpClient.Builder()
                 .connectTimeout(10, TimeUnit.SECONDS)
                 .readTimeout(10, TimeUnit.SECONDS)
@@ -70,18 +86,19 @@ public class BinanceApiClient {
         
         this.objectMapper = new com.fasterxml.jackson.databind.ObjectMapper();
         
-        // Scheduler para sincronizacion
+        // Scheduler para sincronización periódica de tiempo
         this.scheduler = Executors.newSingleThreadScheduledExecutor();
         
-        // Sincroniza tiempo inmediatamente
+        // Sincroniza tiempo inmediatamente al arrancar
         syncServerTime();
         
-        // Inicia sincronizacion periodica
+        // Inicia sincronización periódica cada 5 minutos
         startPeriodicSync();
     }
 
     /**
-     * Inicia sincronizacion cada 5 minutos.
+     * Inicia sincronización de tiempo cada 5 minutos.
+     * Compensa el drift del reloj local contra el servidor de Binance.
      */
     private void startPeriodicSync() {
         scheduler.scheduleAtFixedRate(() -> {
@@ -90,8 +107,9 @@ public class BinanceApiClient {
     }
 
     /**
-     * Sincroniza tiempo local con servidor Binance.
-     * Calcula offset para corregir timestamps.
+     * Sincroniza el tiempo local con el servidor de Binance.
+     * Consulta /api/v3/time y calcula el offset (serverTime - localTime).
+     * Este offset se usa en getCorrectedTimestamp() para firmar requests.
      */
     private void syncServerTime() {
         try {
@@ -102,7 +120,7 @@ public class BinanceApiClient {
                 long serverTime = json.get("serverTime").asLong();
                 long localTime = System.currentTimeMillis();
                 
-                // Calcula offset
+                // Calcula offset (puede ser positivo o negativo)
                 serverTimeOffset = serverTime - localTime;
                 Log.info("Sincronizado con servidor. (Offset: " + serverTimeOffset + "ms)");
             }
@@ -112,14 +130,17 @@ public class BinanceApiClient {
     }
 
     /**
-     * Obtiene timestamp corregido para requests.
-     * @return Timestamp con offset aplicado
+     * Obtiene el timestamp corregido para usar en requests firmados.
+     * Aplica el offset calculado en syncServerTime().
+     * Si el offset es > 60 segundos, usa timestamp local sin corregir
+     * (por seguridad, para no enviar timestamps muy desviados).
+     * @return Timestamp en ms con offset aplicado
      */
     private long getCorrectedTimestamp() {
         long localTime = System.currentTimeMillis();
         long corrected = localTime + serverTimeOffset;
         
-        // Si offset es muy grande, usa tiempo local
+        // Safety: Si offset es muy grande, no corregir
         if (Math.abs(serverTimeOffset) > 60000) {
             Log.warn(TAG, "Offset muy grande (" + serverTimeOffset + "ms), usando timestamp local sin corregir");
             corrected = localTime;
@@ -130,28 +151,31 @@ public class BinanceApiClient {
     }
 
     /**
-     * Obtiene balances de la cuenta.
-     * @return Array [USDT, BNB, precio BNB]
+     * Obtiene los balances de la cuenta (USDT y BNB) y el precio de BNB.
+     * Usa endpoint firmado GET /api/v3/account.
+     * 
+     * @return Array de 3 doubles: [balanceUSDT, balanceBNB, precioBNB]
      */
     public double[] getAccountBalances() {
-        // Valores por defecto si falla
-        double usdtBalance = 11100.0;
-        double bnbBalance = 1.1;
+        // Valores por defecto si falla la consulta
+        double usdtBalance = 0.0;
+        double bnbBalance = 0.0;
         double bnbPrice = 0.0;
 
         try {
-            // Prepara parametros
+            // Preparar parámetros para request firmado
             Map<String, String> params = new HashMap<>();
             params.put("timestamp", String.valueOf(getCorrectedTimestamp()));
             params.put("recvWindow", String.valueOf(RECV_WINDOW));
             
-            // Request firmado
+            // Request firmado a /api/v3/account
             String response = makeSignedRequest("/api/v3/account", params);
             
             if (response != null && !response.isEmpty()) {
                 var accountJson = objectMapper.readTree(response);
                 var balances = accountJson.get("balances");
                 
+                // Iterar balances buscando USDT y BNB
                 if (balances != null && balances.isArray()) {
                     for (var balance : balances) {
                         String asset = balance.get("asset").asText();
@@ -167,7 +191,7 @@ public class BinanceApiClient {
                 }
             }
             
-            // Obtiene precio BNB
+            // Obtener precio actual de BNB para calcular valor de comisiones
             bnbPrice = getSymbolPrice("BNBUSDT");
             Log.debug(TAG, "Saldos - USDT: " + usdtBalance + ", BNB: " + bnbBalance + ", BNB Price: " + bnbPrice);
             
@@ -179,9 +203,11 @@ public class BinanceApiClient {
     }
 
     /**
-     * Obtiene precio de un simbolo.
-     * @param symbol Simbolo (ej: "BNBUSDT")
-     * @return Precio actual
+     * Obtiene el precio actual de un símbolo via endpoint público.
+     * GET /api/v3/ticker/price?symbol=XXX
+     *
+     * @param symbol Símbolo (ej: "BNBUSDT")
+     * @return Precio actual, 0.0 si falla
      */
     public double getSymbolPrice(String symbol) {
         try {
@@ -209,26 +235,40 @@ public class BinanceApiClient {
     }
 
     /**
-     * Coloca una orden.
-     * @param symbol Simbolo
-     * @param side BUY o SELL
-     * @param orderType MARKET o LIMIT
+     * Coloca una orden (sobrecarga sin quoteOrderQty ni realOrder).
+     * @param symbol   Símbolo
+     * @param side     "BUY" o "SELL"
+     * @param orderType "MARKET" o "LIMIT"
      * @param quantity Cantidad
-     * @param price Precio (solo para LIMIT)
-     * @return Resultado de la orden
+     * @param price    Precio (para LIMIT)
+     * @return OrderResult
      */
     public com.arbitrage.model.OrderResult placeOrder(String symbol, String side, String orderType, double quantity, double price) {
         return placeOrder(symbol, side, orderType, quantity, price, 0, false);
     }
 
     /**
-     * Coloca orden con quoteOrderQty (para MARKET orders).
+     * Coloca una orden (pública, con quoteOrderQty y bandera realOrder).
+     *
+     * DIFERENCIA ENTRE MODO REAL Y SIMULADO:
+     * - realOrder=true y API key presente → placeRealOrder() (envía a Binance)
+     * - realOrder=false → genera OrderResult simulado (FILLED instantáneo)
+     *
+     * @param symbol        Símbolo
+     * @param side          "BUY" o "SELL"
+     * @param orderType     "MARKET" o "LIMIT"
+     * @param quantity      Cantidad del base asset
+     * @param price         Precio límite (solo LIMIT)
+     * @param quoteOrderQty Monto en quote asset para MARKET BUY
+     * @param realOrder     true = orden real, false = simulación
+     * @return OrderResult con estado de la orden
      */
     public com.arbitrage.model.OrderResult placeOrder(String symbol, String side, String orderType,
-                                                      double quantity, double price, double quoteOrderQty, boolean realOrder) {
+                                                       double quantity, double price, double quoteOrderQty, boolean realOrder) {
         if (realOrder && !apiConfig.getCurrentApiKey().isEmpty()) {
             return placeRealOrder(symbol, side, orderType, quantity, price, quoteOrderQty);
         } else {
+            // Modo simulación: generar resultado ficticio
             long elapsed = 48;
             String status = apiConfig.isTestnet() ? "TESTNET_FILLED" : "SIMULATED";
             String orderId = String.valueOf(1000000L + (long)(Math.random() * 9000000L));
@@ -249,13 +289,40 @@ public class BinanceApiClient {
     }
 
     /**
-     * Coloca orden real (solo si API key configurada).
+     * COLOCA UNA ORDEN REAL EN BINANCE.
+     * 
+     * Endpoint: POST /api/v3/order (firmado)
+     *
+     * CONSTRUCCIÓN DE LA ORDEN SEGÚN TIPO:
+     *   MARKET:
+     *     - Usa quoteOrderQty (monto en USDT a gastar)
+     *     - No necesita quantity ni price
+     *     - Binance calcula la cantidad automáticamente
+     *
+     *   LIMIT:
+     *     - Usa quantity + price
+     *     - timeInForce = GTC (Good Til Cancelled)
+     *     - La orden permanece en el libro hasta ser llenada o cancelada
+     *
+     * PARSEO DE LA RESPUESTA:
+     *   - Extrae orderId, status, executedQty, price
+     *   - Para MARKET: calcula filledPrice = cummulativeQuoteQty / executedQty
+     *   - Extrae commissionAsset y commissionAmount (para registro de fees)
+     *
+     * @param symbol        Símbolo
+     * @param side          "BUY" o "SELL"
+     * @param orderType     "MARKET" o "LIMIT"
+     * @param quantity      Cantidad (solo LIMIT)
+     * @param price         Precio (solo LIMIT)
+     * @param quoteOrderQty Monto en quote asset (solo MARKET)
+     * @return OrderResult con datos de la orden
      */
     private com.arbitrage.model.OrderResult placeRealOrder(String symbol, String side, String orderType,
-                                                          double quantity, double price, double quoteOrderQty) {
+                                                           double quantity, double price, double quoteOrderQty) {
         try {
             long timestamp = getCorrectedTimestamp();
 
+            // Construir parámetros según tipo de orden
             Map<String, String> params = new HashMap<>();
             params.put("symbol", symbol);
             params.put("side", side);
@@ -264,12 +331,15 @@ public class BinanceApiClient {
             params.put("recvWindow", String.valueOf(RECV_WINDOW));
 
             if ("MARKET".equalsIgnoreCase(orderType)) {
+                // MARKET BUY: usar quoteOrderQty (cantidad de USDT a gastar)
                 params.put("quoteOrderQty", String.format("%.8f", quoteOrderQty));
             } else if ("LIMIT".equalsIgnoreCase(orderType)) {
+                // LIMIT: cantidad + precio + timeInForce=GTC
                 params.put("quantity", String.format("%.8f", quantity));
                 params.put("price", String.format("%.8f", price));
                 params.put("timeInForce", "GTC");
             } else {
+                // Otros tipos (STOP_LOSS, etc.): solo quantity
                 params.put("quantity", String.format("%.8f", quantity));
             }
 
@@ -286,6 +356,7 @@ public class BinanceApiClient {
 String endpoint = "/api/v3/order";
             String response = makeSignedRequest(endpoint, params, true);
 
+            // Extraer orderId de la respuesta
             String realOrderId = null;
             if (response != null && !response.isEmpty()) {
                 try {
@@ -299,6 +370,7 @@ String endpoint = "/api/v3/order";
 
             Log.debug(TAG, "Orden ejecutada: " + side + " " + quantity + " " + symbol + " @ " + price);
 
+            // Parsear respuesta completa de Binance
             String orderStatus = "NEW";
             double executedQty = 0;
             double filledPrice = price;
@@ -322,12 +394,14 @@ String endpoint = "/api/v3/order";
                     if (json.has("price") && !json.get("price").isNull()) {
                         filledPrice = json.get("price").asDouble();
                     }
+                    // Para MARKET orders: precio real = quoteQty / executedQty
                     if ("MARKET".equalsIgnoreCase(orderType) && executedQty > 0) {
                         if (json.has("cummulativeQuoteQty")) {
                             double quoteQty = json.get("cummulativeQuoteQty").asDouble();
                             filledPrice = quoteQty / executedQty;
                         }
                     }
+                    // Extraer datos de comisión (puede ser en BNB, USDT, o el asset mismo)
                     if (json.has("commissionAsset") && !json.get("commissionAsset").isNull()) {
                         commissionAsset = json.get("commissionAsset").asText();
                         commissionAmount = json.has("commission") ? json.get("commission").asDouble() : 0;
@@ -368,7 +442,8 @@ String endpoint = "/api/v3/order";
     }
 
     /**
-     * Convierte bytes a string hexadecimal.
+     * Convierte un array de bytes a string hexadecimal.
+     * Usado para convertir la firma HMAC-SHA256 a string.
      */
     private static String bytesToHex(byte[] bytes) {
         StringBuilder sb = new StringBuilder();
@@ -379,9 +454,11 @@ String endpoint = "/api/v3/order";
     }
 
     /**
-     * Genera firma HMAC-SHA256.
-     * @param queryString Query a firmar
-     * @return Firma en hex
+     * Genera la firma HMAC-SHA256 para autenticar requests.
+     * La firma se calcula sobre el queryString completo ordenado alfabéticamente.
+     * 
+     * @param queryString Query string a firmar (key=value&key=value...)
+     * @return Firma HMAC-SHA256 en hexadecimal
      */
     public String generateSignature(String queryString) {
         try {
@@ -400,15 +477,26 @@ String endpoint = "/api/v3/order";
     }
 
     /**
-     * hace request GET simple.
-     * @param endpoint Endpoint API
-     * @param queryString Query params
-     * @return Response JSON
+     * Ejecuta una request GET simple (sin firma).
+     * @param endpoint    Endpoint API (ej: "/api/v3/time")
+     * @param queryString Query string (ej: "symbol=BNBUSDT")
+     * @return Response body como string JSON
+     * @throws Exception Si la request falla o el status code no es 2xx
      */
     public String makeRequest(String endpoint, String queryString) throws Exception {
         return makeRequestWithMethod(endpoint, queryString, false);
     }
 
+    /**
+     * Ejecuta una request HTTP GET o POST sin firma.
+     * Incluye header X-MBX-APIKEY en todas las requests.
+     * 
+     * @param endpoint    Endpoint API
+     * @param queryString Query string
+     * @param isPost      true para POST, false para GET
+     * @return Response body como string JSON
+     * @throws Exception Si la API retorna error
+     */
     public String makeRequestWithMethod(String endpoint, String queryString, boolean isPost) throws Exception {
         String baseUrl = apiConfig.getCurrentBaseUrl();
         String url = baseUrl + endpoint;
@@ -437,23 +525,34 @@ String endpoint = "/api/v3/order";
     }
 
     /**
-     * hace request firmado (HMAC-SHA256).
+     * Ejecuta una request firmada (HMAC-SHA256) con método GET por defecto.
      * @param endpoint Endpoint API
-     * @param params Parametros
-     * @return Response JSON
+     * @param params   Parámetros de la request (incluyendo timestamp)
+     * @return Response body como string JSON
+     * @throws Exception Si la API retorna error
      */
     public String makeSignedRequest(String endpoint, Map<String, String> params) throws Exception {
         return makeSignedRequest(endpoint, params, false);
     }
 
     /**
-     * hace request firmado con metodo especificado.
-     * @param endpoint Endpoint API
-     * @param params Parametros
-     * @param forcePost true para forzar POST (para placeOrder)
-     * @return Response JSON
+     * Ejecuta una request firmada (HMAC-SHA256).
+     * 
+     * PROCESO DE FIRMA:
+     * 1. Ordena parámetros alfabéticamente (TreeMap)
+     * 2. Construye queryString: key1=value1&key2=value2...
+     * 3. Genera firma HMAC-SHA256 del queryString
+     * 4. Añade &signature=XXXX al queryString
+     * 5. Ejecuta request GET o POST
+     *
+     * @param endpoint   Endpoint API
+     * @param params     Parámetros (timestamp, recvWindow, etc.)
+     * @param forcePost  true para forzar POST (usado en placeOrder)
+     * @return Response body como string JSON
+     * @throws Exception Si la API retorna error
      */
     public String makeSignedRequest(String endpoint, Map<String, String> params, boolean forcePost) throws Exception {
+        // Ordenar parámetros alfabéticamente (requisito de Binance para la firma)
         TreeMap<String, String> sortedParams = new TreeMap<>(params);
         StringBuilder queryBuilder = new StringBuilder();
 
@@ -465,6 +564,7 @@ String endpoint = "/api/v3/order";
         }
 
         String queryString = queryBuilder.toString();
+        // Generar firma HMAC-SHA256
         String signature = generateSignature(queryString);
         queryString += "&signature=" + signature;
 
@@ -473,9 +573,10 @@ String endpoint = "/api/v3/order";
     }
 
     /**
-     * Obtiene lista de simbolos USDT desde Binance.
-     * Solo simbolos con status=TRADING.
-     * @return Lista de simbolos USDT
+     * Obtiene la lista de símbolos USDT con status=TRADING desde Binance.
+     * Consulta GET /api/v3/exchangeInfo y filtra por símbolos que terminan en USDT.
+     * 
+     * @return Lista de símbolos USDT (ej: ["BNBUSDT", "ETHUSDT", ...])
      */
     public List<String> getExchangeSymbols() {
         List<String> symbols = new ArrayList<>();
@@ -493,7 +594,7 @@ String endpoint = "/api/v3/order";
                         String symbol = symbolNode.get("symbol").asText();
                         String status = symbolNode.get("status").asText();
                         
-                        // Solo simbolos USDT con status TRADING
+                        // Solo símbolos USDT con status TRADING
                         if (symbol.endsWith("USDT") && "TRADING".equals(status)) {
                             symbols.add(symbol);
                         }
@@ -511,8 +612,10 @@ Log.info("Cargados " + symbols.size() + " simbolos USDT de Binance");
     }
     
     /**
-     * Obtiene TODOS los simbolos de Binance.
-     * @return Set de todos los simbolos con status TRADING
+     * Obtiene TODOS los símbolos de Binance con status=TRADING.
+     * Útil para conocer todos los pares disponibles (no solo USDT).
+     *
+     * @return Set de todos los símbolos activos
      */
     public Set<String> getAllSymbols() {
         Set<String> symbols = new HashSet<>();
@@ -545,6 +648,29 @@ Log.info("Cargados " + symbols.size() + " simbolos USDT de Binance");
         return symbols;
     }
 
+    /**
+     * Resetea el caché de filtros para forzar una recarga en la próxima llamada.
+     */
+    public void resetFiltersCache() {
+        lastFiltersLoad = 0;
+        Log.debug(TAG, "Exchange info cache reset");
+    }
+
+    /**
+     * CARGA LOS FILTROS DE BINANCE EN CACHÉ (LOT_SIZE, MIN_NOTIONAL, PRICE_FILTER).
+     * 
+     * Este método es crítico para el funcionamiento del bot. Sin estos filtros,
+     * las órdenes serían rechazadas por Binance.
+     *
+     * FILTROS CARGADOS:
+     *   LOT_SIZE: {minQty, maxQty, stepSize} → para ajustar cantidades
+     *   MIN_NOTIONAL / NOTIONAL: {minNotional} → valor mínimo de la orden
+     *   PRICE_FILTER: {tickSize} → para ajustar precios
+     *
+     * El caché tiene TTL de 5 minutos (FILTERS_TTL_MS).
+     * Los filtros se cargan bajo demanda desde loadExchangeInfoFilters()
+     * y también explícitamente al inicializar OrderExecutor.
+     */
     public void loadExchangeInfoFilters() {
         if (System.currentTimeMillis() - lastFiltersLoad < FILTERS_TTL_MS && !lotSizeFilters.isEmpty()) {
             return;
@@ -564,18 +690,22 @@ Log.info("Cargados " + symbols.size() + " simbolos USDT de Binance");
                         String filterType = filter.get("filterType").asText();
                         
                         if ("LOT_SIZE".equals(filterType)) {
+                            // LOT_SIZE: controla cantidad mínima, máxima y step de redondeo
                             Map<String, Double> f = new HashMap<>();
                             f.put("minQty", Double.parseDouble(filter.get("minQty").asText()));
                             f.put("maxQty", Double.parseDouble(filter.get("maxQty").asText()));
                             f.put("stepSize", Double.parseDouble(filter.get("stepSize").asText()));
                             lotSizeFilters.put(symbol, f);
                         } else if ("MIN_NOTIONAL".equals(filterType)) {
+                            // MIN_NOTIONAL: valor nominal mínimo de la orden
                             double minNotional = Double.parseDouble(filter.get("minNotional").asText());
                             minNotionalFilters.put(symbol, minNotional);
                         } else if ("NOTIONAL".equals(filterType)) {
+                            // NOTIONAL: reemplazo moderno de MIN_NOTIONAL
                             double minNotional = Double.parseDouble(filter.get("minNotional").asText());
                             minNotionalFilters.put(symbol, minNotional);
                         } else if ("PRICE_FILTER".equals(filterType)) {
+                            // PRICE_FILTER: tickSize para redondeo de precios
                             double tickSize = Double.parseDouble(filter.get("tickSize").asText());
                             priceTickSizes.put(symbol, tickSize);
                         }
@@ -589,7 +719,47 @@ Log.info("Cargados " + symbols.size() + " simbolos USDT de Binance");
         }
     }
 
+    /**
+     * Carga filtros de exchangeInfo solo para los símbolos dados.
+     * Optimizado para cargar solo los filtros de los símbolos triangulares.
+     * 
+     * @param symbols Conjunto de símbolos a cargar (ej: BTCUSDT, ETHBTC, ETHUSDT)
+     */
+    public void loadExchangeInfoFiltersForSymbols(Set<String> symbols) {
+        if (symbols == null || symbols.isEmpty()) {
+            return;
+        }
+        loadExchangeInfoFilters();
+        
+        Map<String, Double> filteredNotional = new HashMap<>();
+        for (String s : symbols) {
+            Double minNotional = minNotionalFilters.get(s);
+            if (minNotional != null) {
+                filteredNotional.put(s, minNotional);
+            }
+        }
+        minNotionalFilters.clear();
+        minNotionalFilters.putAll(filteredNotional);
+    }
+
+    /**
+     * AJUSTA UNA CANTIDAD AL LOT_SIZE DEL SÍMBOLO.
+     * 
+     * LOT_SIZE es un filtro de Binance que define:
+     *   minQty: cantidad mínima permitida
+     *   maxQty: cantidad máxima permitida
+     *   stepSize: incremento mínimo (redondeo)
+     *
+     * El ajuste se hace con Math.floor(qty / stepSize) * stepSize
+     * para asegurar que la cantidad NO exceda el máximo permitido.
+     * Si qty < minQty, se retorna minQty.
+     *
+     * @param symbol Símbolo (ej: "BNBUSDT")
+     * @param qty    Cantidad a ajustar
+     * @return Cantidad ajustada al LOT_SIZE
+     */
     public double adjustQuantityToLotSize(String symbol, double qty) {
+        // Asegurar que los filtros estén cargados
         loadExchangeInfoFilters();
 
         if (symbol == null) {
@@ -605,14 +775,21 @@ Log.info("Cargados " + symbols.size() + " simbolos USDT de Binance");
         double minQty = f.get("minQty");
         double stepSize = f.get("stepSize");
 
+        // Si la cantidad es menor al mínimo, usar el mínimo
         if (qty < minQty) {
             Log.debug(TAG, symbol + ": qty " + qty + " < min " + minQty + ", using min");
             return minQty;
         }
 
+        // Redondear hacia abajo al stepSize más cercano
         return Math.floor(qty / stepSize) * stepSize;
     }
 
+    /**
+     * Ajuste de cantidad genérico (sin LOT_SIZE).
+     * Redondea a 5 decimales (0.00001).
+     * Útil para cantidades muy pequeñas.
+     */
     public double adjustQuantityRaw(double qty) {
         if (qty < 0.00001) {
             return 0.00001;
@@ -620,6 +797,19 @@ Log.info("Cargados " + symbols.size() + " simbolos USDT de Binance");
         return Math.floor(qty / 0.00001) * 0.00001;
     }
 
+    /**
+     * AJUSTA UN PRECIO AL TICK SIZE DEL SÍMBOLO (PRICE_FILTER).
+     * 
+     * PRICE_FILTER define el tickSize: incremento mínimo en el precio.
+     * Ej: si tickSize=0.01, el precio debe ser múltiplo de 0.01.
+     * 
+     * Usa Math.round() en lugar de Math.floor() porque el precio
+     * puede redondearse hacia arriba o abajo.
+     *
+     * @param symbol Símbolo
+     * @param price  Precio a ajustar
+     * @return Precio ajustado al tickSize
+     */
     public double adjustPriceToTickSize(String symbol, double price) {
         loadExchangeInfoFilters();
         if (symbol == null) {
@@ -632,31 +822,49 @@ Log.info("Cargados " + symbols.size() + " simbolos USDT de Binance");
         return Math.round(price / tickSize) * tickSize;
     }
 
+    /**
+     * Retorna el tickSize (PRICE_FILTER) de un símbolo.
+     * @param symbol Símbolo
+     * @return tickSize, o 0.00000001 por defecto
+     */
     public double getTickSize(String symbol) {
         loadExchangeInfoFilters();
         Double tickSize = priceTickSizes.get(symbol);
         return tickSize != null ? tickSize : 0.00000001;
     }
 
+    /**
+     * Retorna el MIN_NOTIONAL de un símbolo (valor mínimo de orden).
+     * Si no encuentra el filtro, retorna 10.0 USDT como valor seguro.
+     * @param symbol Símbolo
+     * @return Min notional en USDT
+     */
     public double getMinNotional(String symbol) {
         loadExchangeInfoFilters();
         Double minNotional = minNotionalFilters.get(symbol);
         return minNotional != null ? minNotional : 10.0;
     }
 
+    /**
+     * Retorna MIN_NOTIONAL o 0 si no existe (para cálculos comparativos).
+     * @param symbol Símbolo
+     * @return Min notional, o 10.0 por defecto
+     */
     public double getMinNotionalOrZero(String symbol) {
         loadExchangeInfoFilters();
         Double minNotional = minNotionalFilters.get(symbol);
-        if (minNotional != null) {
+        if (minNotional != null && minNotional > 0) {
             return minNotional;
         }
         return 10.0;
     }
 
     /**
-     * Obtiene el balance disponible de un asset específico.
+     * Obtiene el balance disponible (free) de un asset específico.
+     * Consulta GET /api/v3/account (firmado) y busca el asset.
+     *
      * @param asset Nombre del asset (ej: "BNB", "USDT", "SUI")
-     * @return Balance free del asset, 0 si falla
+     * @return Balance free del asset, 0 si no se encuentra o falla
      */
     public double getAssetBalance(String asset) {
         try {
@@ -688,10 +896,26 @@ Log.info("Cargados " + symbols.size() + " simbolos USDT de Binance");
     }
 
     /**
-     * Extrae el base asset de un símbolo Binance.
-     * Ej: "BNBUSDT" → "BNB", "SUIBNB" → "SUI", "ETHBTC" → "ETH"
+     * Obtiene el balance disponible de BNB específicamente.
+     * Usa getAssetBalance("BNB") internamente.
+     *
+     * @return Balance free de BNB, 0 si falla
+     */
+    public double getBNBBalance() {
+        return getAssetBalance("BNB");
+    }
+
+    /**
+     * Extrae el BASE ASSET de un símbolo Binance.
+     * 
+     * Lógica: el base asset es la primera parte del par.
+     * Ejemplos:
+     *   "BNBUSDT" → "BNB"  (base=BNB, quote=USDT)
+     *   "SUIBNB"  → "SUI"  (base=SUI, quote=BNB)
+     *   "ETHBTC"  → "ETH"  (base=ETH, quote=BTC)
+     *
      * @param symbol Símbolo Binance
-     * @return Base asset
+     * @return Base asset del símbolo
      */
     public String extractBaseAsset(String symbol) {
         if (symbol == null || symbol.isEmpty()) {
@@ -719,7 +943,7 @@ Log.info("Cargados " + symbols.size() + " simbolos USDT de Binance");
     }
 
     /**
-     * Cierra recursos.
+     * Cierra el scheduler de sincronización de tiempo.
      */
     public void shutdown() {
         if (scheduler != null && !scheduler.isShutdown()) {
@@ -728,10 +952,16 @@ Log.info("Cargados " + symbols.size() + " simbolos USDT de Binance");
     }
 
     /**
-     * Obtiene simbolos USDT ordenados por volumen.
-     * Intenta obtener de /api/v3/ticker/24hr, si falla usa fallback con getAllSymbols.
-     * @param limit Numero maximo de simbolos
-     * @return Lista de simbolos USDT
+     * Obtiene símbolos USDT ordenados por volumen de trading (descendente).
+     * 
+     * ESTRATEGIA DE OBTENCIÓN:
+     *   Intento 1: GET /api/v3/ticker/24hr (sin symbol) → obtiene todos los tickers
+     *              con quoteVolume. Filtra USDT, ordena por volumen.
+     *   Fallback:  Si el intento 1 falla (respuesta vacía), usa getAllSymbols()
+     *              filtrado por USDT (sin datos de volumen, van al final).
+     *
+     * @param limit Número máximo de símbolos a retornar
+     * @return Lista de símbolos USDT ordenados por volumen descendente
      */
     public List<String> getUsdtSymbolsByVolume(int limit) {
         List<String> symbols = new ArrayList<>();
@@ -791,6 +1021,9 @@ Log.info("Cargados " + symbols.size() + " simbolos USDT de Binance");
         return symbols;
     }
 
+    /**
+     * Clase interna para almacenar símbolo + volumen de trading.
+     */
     private static class SymbolVolume {
         String symbol;
         double volume;
@@ -801,10 +1034,16 @@ Log.info("Cargados " + symbols.size() + " simbolos USDT de Binance");
     }
 
     /**
-     * Consulta el estado de una orden existente.
-     * @param symbol Simbolo de la orden
+     * CONSULTA EL ESTADO DE UNA ORDEN EXISTENTE EN BINANCE.
+     * 
+     * Endpoint: GET /api/v3/order?symbol=X&orderId=Y (firmado)
+     *
+     * Para MARKET orders: calcula el precio real como cummulativeQuoteQty / executedQty
+     * ya que Binance devuelve price=0.0 en MARKET fills.
+     *
+     * @param symbol  Símbolo de la orden
      * @param orderId ID de la orden en Binance
-     * @return OrderResult con estado actual
+     * @return OrderResult con estado actual (FILLED, CANCELED, NEW, PARTIALLY_FILLED, etc.)
      */
     public com.arbitrage.model.OrderResult queryOrder(String symbol, String orderId) {
         try {
@@ -822,6 +1061,7 @@ Log.info("Cargados " + symbols.size() + " simbolos USDT de Binance");
             if (response != null && !response.isEmpty()) {
                 var json = objectMapper.readTree(response);
 
+                // Para MARKET orders: el precio real se calcula del quoteQty
                 double filledPrice = json.get("price").asDouble();
                 if ("MARKET".equalsIgnoreCase(json.get("type").asText())) {
                     double executedQty = json.get("executedQty").asDouble();
@@ -861,10 +1101,16 @@ Log.info("Cargados " + symbols.size() + " simbolos USDT de Binance");
     }
 
     /**
-     * Cancela una orden existente.
-     * @param symbol Simbolo de la orden
+     * CANCELA UNA ORDEN EXISTENTE EN BINANCE.
+     * 
+     * Endpoint: DELETE /api/v3/order?symbol=X&orderId=Y (firmado)
+     * 
+     * Usa HTTP DELETE con query string firmado.
+     * Solo cancela órdenes en estado NEW o PARTIALLY_FILLED.
+     *
+     * @param symbol  Símbolo de la orden
      * @param orderId ID de la orden en Binance
-     * @return OrderResult con estado de cancelacion
+     * @return OrderResult con estado "CANCELED" si éxito, "ERROR" si falla
      */
     public com.arbitrage.model.OrderResult cancelOrder(String symbol, String orderId) {
         try {
@@ -876,6 +1122,7 @@ Log.info("Cargados " + symbols.size() + " simbolos USDT de Binance");
             params.put("timestamp", String.valueOf(timestamp));
             params.put("recvWindow", String.valueOf(RECV_WINDOW));
             
+            // Construir query string firmado
             TreeMap<String, String> sortedParams = new TreeMap<>(params);
             StringBuilder queryBuilder = new StringBuilder();
             for (Map.Entry<String, String> entry : sortedParams.entrySet()) {
@@ -889,6 +1136,7 @@ Log.info("Cargados " + symbols.size() + " simbolos USDT de Binance");
             String baseUrl = apiConfig.getCurrentBaseUrl();
             String url = baseUrl + "/api/v3/order?" + queryString;
             
+            // DELETE request con query string firmado
             okhttp3.Request request = new okhttp3.Request.Builder()
                     .url(url)
                     .delete()
@@ -923,13 +1171,13 @@ Log.info("Cargados " + symbols.size() + " simbolos USDT de Binance");
     }
 
     /**
-     * Coloca una orden usando bandera realOrder.
-     * @param symbol Simbolo
-     * @param side BUY o SELL
-     * @param orderType MARKET o LIMIT
-     * @param quantity Cantidad
-     * @param price Precio
-     * @param realOrder true para orden real, false para simulado
+     * Coloca una orden (sobrecarga con bandera realOrder).
+     * @param symbol    Símbolo
+     * @param side      "BUY" o "SELL"
+     * @param orderType "MARKET" o "LIMIT"
+     * @param quantity  Cantidad
+     * @param price     Precio
+     * @param realOrder true para orden real, false para simulación
      * @return OrderResult
      */
     public com.arbitrage.model.OrderResult placeOrder(String symbol, String side, String orderType, 
@@ -937,6 +1185,14 @@ Log.info("Cargados " + symbols.size() + " simbolos USDT de Binance");
         return placeOrder(symbol, side, orderType, quantity, price, 0.0, realOrder);
     }
 
+    /**
+     * Extrae el QUOTE ASSET de un símbolo Binance.
+     * Es la segunda parte del par (la moneda en la que se cotiza).
+     * Ej: "BNBUSDT" → "USDT", "SUIBNB" → "BNB"
+     * 
+     * @param symbol Símbolo Binance
+     * @return Quote asset, o "" si no se reconoce
+     */
     public String extractQuoteAsset(String symbol) {
         if (symbol == null || symbol.isEmpty()) {
             return "";

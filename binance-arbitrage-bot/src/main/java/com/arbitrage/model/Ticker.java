@@ -4,26 +4,32 @@ import lombok.Builder;
 import lombok.Data;
 
 /**
- * Representa los precios de un simbolo.
- * Contiene los mejores precios de compra y venta:
- *   - Bid: mejor precio de venta (vendes a este precio)
- *   - Ask: mejor precio de compra (compras a este precio)
+ * Representa los precios actuales de un símbolo en el libro de órdenes de Binance.
+ * <p>
+ * Contiene los mejores precios bid (compra) y ask (venta) obtenidos del
+ * WebSocket de bookTicker o de la API REST. Es la fuente principal de
+ * datos para el cálculo de oportunidades de arbitraje.
+ * </p>
+ * <p>
+ * Nota: En el contexto del bot, se usa bidPrice para vender y askPrice para
+ * comprar, simulando la ejecución contra el libro de órdenes.
+ * </p>
  */
 @Data
 @Builder
 public class Ticker {
-    // Simbolo (ej: "BTCUSDT")
+    /** Símbolo del par (ej: "BTCUSDT") */
     private String symbol;
-    
-    // Mejor precio de venta (vender)
+
+    /** Mejor precio bid (comprador) — precio al que se puede vender */
     private double bidPrice;
-    
-    // Mejor precio de compra (comprar)
+
+    /** Mejor precio ask (vendedor) — precio al que se puede comprar */
     private double askPrice;
-    
-    // Cantidad disponible en bid
+
+    /** Cantidad disponible al mejor precio bid */
     private double bidQty;
-    
-    // Cantidad disponible en ask
+
+    /** Cantidad disponible al mejor precio ask */
     private double askQty;
 }

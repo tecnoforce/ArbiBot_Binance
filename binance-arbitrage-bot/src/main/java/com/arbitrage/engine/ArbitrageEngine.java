@@ -15,15 +15,31 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
 /**
- * Motor de arbitraje triangular.
- * Escanea precios cada 100ms y busca oportunidades de arbitraje
- * entre tres pares de criptomonedas en un triangulo.
- * 
- * Ejemplo de triangulo: BTC->ETH->USDT -> BTC
- *   1. Vender BTC por USDT (BTCUSDT)
- *   2. Comprar ETH con USDT (ETHUSDT)
- *   3. Vender ETH por BTC (ETHBTC)
- *   Si el resultado es > 0, hay oportunidad de arbitraje.
+ * Motor principal de arbitraje triangular.
+ *
+ * ## Responsabilidad
+ * Escanea ciclicamente (cada 100ms) todos los triangulos generados por
+ * {@link TriangleCalculator} y evalua si existe una oportunidad de arbitraje
+ * rentable en el mercado spot de Binance.
+ *
+ * ## Flujo de deteccion
+ *  1) El WebSocket actualiza {@code priceMap} con precios en tiempo real.
+ *  2) {@link #start()} programa un {@code ScheduledExecutorService} a 100ms.
+ *  3) Cada ciclo recorre en paralelo todos los triangulos.
+ *  4) Por cada triangulo obtiene sus 3 tickers y delega el calculo a
+ *     {@link ProfitCalculator#calculate(Triangle, double, Ticker, Ticker, Ticker)}.
+ *  5) Si la oportunidad supera los umbrales configurados y es "novedosa"
+ *     (diferencia > 0.01% respecto al profit anterior), la emite via callback.
+ *
+ * ## Triangulo de ejemplo (forward: USDT -> BTC -> ETH -> USDT)
+ *   1. COMPRAR BTC con USDT en BTCUSDT  (ask)
+ *   2. VENDER BTC por ETH en ETHBTC      (bid)
+ *   3. VENDER ETH por USDT en ETHUSDT    (bid)
+ *   Si profit > minProfit se ejecuta la oportunidad.
+ *
+ * @see TriangleCalculator  Generacion de combinaciones triangulares
+ * @see ProfitCalculator    Calculo matematico del profit
+ * @see PrecisionAdjuster   Ajuste de cantidades segun reglas del exchange
  */
 public class ArbitrageEngine {
     private static final String TAG = "Engine";
@@ -31,28 +47,33 @@ public class ArbitrageEngine {
     // =====================================================================
     // DEPENDENCIAS Y CONFIGURACION
     // =====================================================================
-    private final AppConfig config;                              // Configuracion
-    private final ProfitCalculator profitCalculator;            // Calcula profit
-    
+    private final AppConfig config;                              // Configuracion global (fees, balances, umbrales)
+    private final ProfitCalculator profitCalculator;            // Calcula profit bruto de cada triangulo
+
     // =====================================================================
     // EJECUTOR DE TAREAS
     // =====================================================================
-    private final ScheduledExecutorService scheduler;          // Scheduler para escaneo
-    
+    // Pool de threads para escanear triangulos en paralelo cada 100ms
+    private final ScheduledExecutorService scheduler;          // Scheduler para escaneo periodico
+
     // =====================================================================
     // DATOS COMPARTIDOS
     // =====================================================================
-    private final ConcurrentHashMap<String, Ticker> priceMap;    // Precios en tiempo real
-    private final List<Triangle> triangles;                   // Triangulos a evaluar
-    private final ConcurrentHashMap<String, Double> lastProfitByTriangle; // Profit anterior
-    private final Consumer<ArbitrageOpportunity> opportunityConsumer; // Callback
-    
+    // Mapa actualizado por BinanceWebSocketClient en tiempo real
+    // Clave: symbol (ej: "BTCUSDT"), Valor: Ticker con bid/ask
+    private final ConcurrentHashMap<String, Ticker> priceMap;    // Precios en tiempo real (thread-safe)
+    private final List<Triangle> triangles;                   // Triangulos pre-generados a evaluar
+    // Cache del ultimo profit por triangulo; evita emitir oportunidades identicas repetidas
+    private final ConcurrentHashMap<String, Double> lastProfitByTriangle; // Profit anterior (key: triangle.id)
+    // Funcion callback que recibe la oportunidad lista para ejecutar (OrderExecutor)
+    private final Consumer<ArbitrageOpportunity> opportunityConsumer; // Callback de ejecucion
+
     // =====================================================================
     // ESTADISTICAS
     // =====================================================================
-    private final AtomicInteger scanCount;        // Contador de escaneos
-    private final AtomicInteger opportunityCount; // Contador de oportunidades
-    private volatile boolean running = false;   // Flag de control
+    private final AtomicInteger scanCount;        // Total de ciclos de escaneo ejecutados
+    private final AtomicInteger opportunityCount; // Total de oportunidades emitidas
+    private volatile boolean running = false;   // Bandera volatile para detener el loop
 
     /**
      * Constructor del motor de arbitraje.

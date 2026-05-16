@@ -7,14 +7,35 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import java.util.*;
 
+/**
+ * Herramienta independiente para consultar y mostrar el historial de trades
+ * ejecutados en TESTNET.
+ * <p>
+ * Uso: ejecutar directamente desde l&iacute;nea de comandos. Requiere
+ * {@code ../user.apiConfig} con credenciales de testnet v&aacute;lidas.
+ * Consulta el endpoint {@code /api/v3/myTrades} para una lista predefinida
+ * de s&iacute;mbolos (TRX, BTC, ETH, BNB, etc.) y muestra cada trade con
+ * fecha, precio, cantidad, total y comisi&oacute;n.
+ * </p>
+ */
 public class GetOrderHistory {
+    /**
+     * Punto de entrada. Itera sobre una lista fija de s&iacute;mbolos, consulta
+     * el historial de trades firmado para cada uno y muestra los resultados
+     * en consola con formato legible. Evita duplicados usando un Set de IDs.
+     *
+     * @param args Argumentos (no utilizados)
+     */
     public static void main(String[] args) {
         try {
+            // Cargar credenciales desde el archivo user.apiConfig (ruta relativa ../)
             ApiConfig apiConfig = ConfigLoader.loadApiConfig("../user.apiConfig");
+            // Cliente HTTP para llamadas REST firmadas a la API de Binance
             BinanceApiClient client = new BinanceApiClient(apiConfig);
             
             System.out.println("=== HISTORIAL DE TRADES (TESTNET) ===\n");
             
+            // Lista de simbolos a consultar (predefinida para cubrir los principales pares USDT)
             String[] symbols = {
                 "TRXUSDT", "BTCUSDT", "ETHUSDT", "BNBUSDT", "LTCUSDT", "SOLUSDT",
                 "ADAUSDT", "XRPUSDT", "DOGEUSDT", "DOTUSDT", "AVAXUSDT", "MATICUSDT",
@@ -27,6 +48,7 @@ public class GetOrderHistory {
             Set<String> printedTrades = new LinkedHashSet<>();
             int totalTrades = 0;
             
+            // Iterar sobre cada simbolo y obtener trades usando endpoint firmado /api/v3/myTrades
             for (String symbol : symbols) {
                 try {
                     Map<String, String> params = new HashMap<>();

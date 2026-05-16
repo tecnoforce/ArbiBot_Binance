@@ -3,44 +3,72 @@ package com.arbitrage.display;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Animación de stream en tiempo real.
- * Muestra una barra de progreso que se mueve de izquierda a derecha y viceversa.
- * Funciona como hilo daemon independiente para no bloquear el análisis.
+ * StreamAnimation - Animacion de progreso en tiempo real para la consola.
+ *
+ * Proposito: Proporcionar retroalimentacion visual al usuario mientras el bot
+ * escanea el mercado en busca de oportunidades de arbitraje triangular.
+ * Muestra una barra de progreso horizontal con efecto "rebote": un caracter
+ * '#' se desplaza de izquierda a derecha y viceversa, simulando actividad.
+ *
+ * Caracteristicas principales:
+ * - Ejecuta en un hilo DAEMON para no bloquear el hilo principal de analisis
+ * - Muestra en tiempo real: estado, precioMapSize y conteo de mensajes WebSocket
+ * - Usa carriage return (\\r) para sobreescribir la misma linea sin scroll
+ * - Detecta el ancho de la terminal para adaptar la salida al tamanio real
+ * - Colores segun estado: verde (listo), amarillo (escaneando), rojo (error)
+ * - Iconos Unicode: ✓ listo, ▸ activo, ⏳ espera, ✗ error
+ * - Autonomia completa: arranque (start), parada (stop) y limpieza automatica
+ *
+ * Flujo de trabajo tipico:
+ *   1. Se crea instancia al inicio del bot
+ *   2. start() arranca el hilo daemon que imprime frames cada 100ms
+ *   3. Otros componentes (WebSocket, Engine) actualizan status/metricas
+ *   4. stop() detiene el hilo y limpia la ultima linea de la consola
+ *
+ * Concurrencia:
+ *   - Variables de estado declaradas volatile para visibilidad entre hilos
+ *   - messageCount y priceMapSize protegidos con synchronized (lock)
+ *   - El hilo de animacion solo LEE, los hilos externos ESCRIBEN
  */
 public class StreamAnimation {
-    
+
     // =====================================================================
-    // CONFIGURACIÓN DE ANIMACIÓN
+    // CONFIGURACION DE ANIMACION
     // =====================================================================
-    private static final int BAR_LENGTH = 47;
-    private static final long FRAME_DELAY_MS = 100;
-    private static final int MIN_WIDTH = 100;
-    private static final int DEFAULT_WIDTH = 120;
-    
-    // Códigos ANSI para colores
+    private static final int BAR_LENGTH = 47;      // Caracteres totales de la barra de progreso
+    private static final long FRAME_DELAY_MS = 100; // Intervalo entre frames (~10 FPS)
+    private static final int MIN_WIDTH = 100;        // Ancho minimo de terminal para animar
+    private static final int DEFAULT_WIDTH = 120;    // Ancho por defecto si no se puede detectar
+
+    // Codigos ANSI para colores segun el estado del stream
     private static final String ANSI_YELLOW = "\u001B[33m";
     private static final String ANSI_GREEN = "\u001B[32m";
     private static final String ANSI_CYAN = "\u001B[36m";
     private static final String ANSI_RESET = "\u001B[0m";
-    
+
     // =====================================================================
-    // ESTADO (volatile para thread safety)
+    // ESTADO DEL ANIMADOR (variables volatile para thread safety)
+    // Se leen desde el hilo de animacion y se escriben desde otros hilos.
+    // Volatile garantiza visibilidad sin bloqueos para lecturas/escrituras
+    // simples, pero las operaciones compuestas usan synchronized(lock).
     // =====================================================================
-    private volatile boolean running = false;
-    private volatile int messageCount = 0;
-    private volatile int priceMapSize = 0;
-    private volatile int totalSymbols = 36;
-    private volatile String status = "SCANNING";
-    private volatile boolean animationStarted = false;
+    private volatile boolean running = false;        // Control del bucle principal de animacion
+    private volatile int messageCount = 0;           // Cantidad de mensajes WebSocket recibidos
+    private volatile int priceMapSize = 0;           // Tamanio actual del mapa de precios
+    private volatile int totalSymbols = 36;          // Total de simbolos esperados en el stream
+    private volatile String status = "SCANNING";     // Estado actual del stream
+    private volatile boolean animationStarted = false; // Flag interno: el hilo ya comenzo a ejecutarse
     
-    // Hilo de animación
+    // Hilo daemon que ejecuta el bucle de animacion en segundo plano
     private Thread animationThread;
-    
-    // Posición y dirección del caracter #
+
+    // Posicion actual del caracter '#' dentro de la barra (0 a BAR_LENGTH-1)
     private int position = 0;
-    private int direction = 1; // 1 = derecha, -1 = izquierda
-    
-    // Lock para actualizar datos
+    // Direccion del movimiento: +1 = hacia la derecha, -1 = hacia la izquierda
+    private int direction = 1;
+
+    // Lock para sincronizar acceso a messageCount y priceMapSize
+    // entre el hilo de animacion (lectura) y los hilos del bot (escritura)
     private final Object lock = new Object();
     
     // =====================================================================

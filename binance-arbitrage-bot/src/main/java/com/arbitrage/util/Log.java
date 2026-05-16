@@ -6,35 +6,72 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * Sistema de logging personalizado.
- * Provee 5 niveles de log con control por configuracion.
+ * Log - Sistema de logging personalizado para el bot de arbitraje.
+ *
+ * A diferencia de SLF4J/Logback (deliberadamente no usados en este proyecto),
+ * implementa un logging ligero con 5 niveles jerarquicos sin dependencias externas.
+ *
+ * Jerarquia de niveles (cada nivel incluye todos los inferiores):
+ *   ERROR (0) - Solo errores criticos que requieren atencion inmediata
+ *   WARN  (1) - Advertencias y errores recuperables
+ *   INFO  (2) - Informacion general de operacion (nivel por defecto)
+ *   SCAN  (3) - Oportunidades de arbitraje detectadas (modo silencioso)
+ *   DEBUG (4) - Mensajes de depuracion detallados para desarrollo
+ *
+ * Formato de salida:
+ *   [TAG] mensaje
+ * Donde TAG es un identificador de 3-4 caracteres que indica el componente
+ * emisor (API, Engine, ORDER_EXEC, SEQ_FILE, STATS_MGR, etc.).
+ *
+ * Modo SCAN:
+ *   Disenado especificamente para este bot de arbitraje. Cuando el nivel
+ *   se establece a SCAN, solo se muestran oportunidades con profit positivo.
+ *   Los profits <= 0 se silencian, dando una interfaz limpia y enfocada.
+ *
+ * Configuracion:
+ *   El nivel se define en el archivo .config con la clave "logLevel".
+ *   Valores aceptados: DEBUG, SCAN, INFO, WARN, ERROR (case-insensitive).
+ *   Si no se especifica, el nivel por defecto es INFO.
+ *
+ * NOTA: Los metodos print() y printRaw() tienen comportamiento especial:
+ *   print()     - Imprime siempre, sin filtro de nivel
+ *   printRaw()  - Imprime solo si el nivel activo es DEBUG
  */
 public class Log {
 
     // =====================================================================
-    // NIVELES DE LOG
+    // NIVELES DE LOG - Mapa nivel->valor numerico para comparacion jerarquica
     // =====================================================================
     private static final Map<String, Integer> LEVELS = new HashMap<>();
-    private static String LEVEL = "INFO";
-    private static boolean initialized = false;
-    
-    // Formato de timestamp
+    private static String LEVEL = "INFO";          // Nivel activo actual (default: INFO)
+    private static boolean initialized = false;     // Flag de inicializacion
+
+    // Formato de timestamp para mensajes (ej. "14:30:15.123")
     private static final DateTimeFormatter TIME_FORMAT = DateTimeFormatter.ofPattern("HH:mm:ss.SSS");
 
     // =====================================================================
-    // DEFINICION DE NIVELES
+    // DEFINICION DE NIVELES JERARQUICOS
+    // Valores numericos: mayor numero = mayor verbosidad (incluye niveles inferiores)
+    //   ERROR=0  -> Solo muestra ERROR
+    //   WARN=1   -> ERROR + WARN
+    //   INFO=2   -> ERROR + WARN + INFO (default)
+    //   SCAN=3   -> ERROR + WARN + INFO + SCAN
+    //   DEBUG=4  -> ERROR + WARN + INFO + SCAN + DEBUG (todo)
     // =====================================================================
     static {
-        LEVELS.put("ERROR", 0);   // Solo errores
-        LEVELS.put("WARN", 1);    // Warnings+
-        LEVELS.put("INFO", 2);     // Info+ (default)
-        LEVELS.put("SCAN", 3);    // Scan+ (muestra oportunidades)
-        LEVELS.put("DEBUG", 4);   // Todo
+        LEVELS.put("ERROR", 0);
+        LEVELS.put("WARN", 1);
+        LEVELS.put("INFO", 2);
+        LEVELS.put("SCAN", 3);
+        LEVELS.put("DEBUG", 4);
     }
 
     /**
-     * Inicializa el sistema de logs.
-     * @param level Nivel de log (DEBUG, SCAN, INFO, WARN, ERROR)
+     * Inicializa el sistema de logs con el nivel especificado.
+     * Convierte el nivel a mayusculas y valida que no sea nulo/vacio.
+     * Si el nivel es invalido o nulo, usa INFO como predeterminado.
+     *
+     * @param level Nivel de log deseado (DEBUG, SCAN, INFO, WARN, ERROR)
      */
     public static void init(String level) {
         LEVEL = (level != null && !level.isEmpty()) ? level.toUpperCase() : "INFO";
@@ -42,7 +79,11 @@ public class Log {
     }
 
     /**
-     * Obtiene valor numerico del nivel actual.
+     * Obtiene el valor numerico asociado al nivel de log actual.
+     * Permite comparar niveles usando operadores >= y <=.
+     * Si el nivel no existe en el mapa, retorna 2 (equivalente a INFO).
+     *
+     * @return Valor entero del nivel activo (0-4)
      */
     private static int getLevelValue() {
         return LEVELS.getOrDefault(LEVEL, 2);
@@ -152,7 +193,13 @@ public class Log {
     }
 
     /**
-     * Imprime con nivel pero sin timestamp (mas limpio para SCAN mode).
+     * Imprime un mensaje con el nivel especificado, sin timestamp.
+     * El mensaje solo se muestra si el nivel del mensaje es menor o igual
+     * al nivel activo (ej. con nivel INFO, solo pasan ERROR, WARN, INFO).
+     * Disenado asi para modo SCAN: mensajes limpios sin clutter de timestamp.
+     *
+     * @param level Nivel del mensaje (ERROR|WARN|INFO|SCAN|DEBUG)
+     * @param msg Contenido del mensaje a imprimir
      */
     private static void print(String level, String msg) {
         int msgLevel = LEVELS.getOrDefault(level, 2);
@@ -162,7 +209,10 @@ public class Log {
     }
 
     /**
-     * Imprime raw (sin timestamp) si el nivel lo permite.
+     * Imprime un mensaje sin formato solo si el nivel activo es DEBUG.
+     * Util para depuracion temporal sin modificar callers existentes.
+     *
+     * @param msg Mensaje a imprimir (solo visible en modo DEBUG)
      */
     public static void printRaw(String msg) {
         if (getLevelValue() >= LEVELS.get("DEBUG")) {
@@ -171,7 +221,9 @@ public class Log {
     }
 
     /**
-     * Obtiene nivel actual.
+     * Obtiene el nivel de log activo actual.
+     *
+     * @return String del nivel activo (DEBUG|SCAN|INFO|WARN|ERROR)
      */
     public static String getCurrentLevel() {
         return LEVEL;
